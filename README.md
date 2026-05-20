@@ -1,130 +1,208 @@
 # MaplibreThreeAabb
 
-<a alt="Nx logo" href="https://nx.dev" target="_blank" rel="noreferrer"><img src="https://raw.githubusercontent.com/nrwl/nx/master/images/nx-logo.png" width="45"></a>
+MapLibre GL JS v4와 Three.js custom layer를 결합해 만든 3D 도형 편집기입니다.
 
-✨ Your new, shiny [Nx workspace](https://nx.dev) is ready ✨.
+현재 앱은 지도를 바탕으로 임의의 footprint를 직접 편집하고, 그 footprint를 즉시 3D extrusion 메쉬로 다시 생성합니다. 편집용 UI는 SVG 오버레이로 처리하고, 실제 3D 렌더링은 Three.js가 MapLibre의 WebGL 컨텍스트 안에서 담당합니다.
 
-[Learn more about this workspace setup and its capabilities](https://nx.dev/getting-started/tutorials/react-standalone-tutorial?utm_source=nx_project&amp;utm_medium=readme&amp;utm_campaign=nx_projects) or run `npx nx graph` to visually explore what was created. Now, let's get you up to speed!
+## 핵심 기능
 
-## Run tasks
+- 다각형 footprint의 꼭짓점 드래그 편집
+- 선분 중간 `+` 핸들로 점 추가
+- 선택 점 삭제 버튼 및 `Delete` / `Backspace` 삭제
+- 도형 전체 드래그 이동
+- 상단 회전 핸들로 회전
+- 높이 슬라이더로 extrusion 높이 실시간 조절
+- MapLibre 지도 위 3D custom layer 렌더링
+- Electron 개발/패키징 지원
 
-To run the dev server for your app, use:
+## 실행 방법
 
-```sh
-npx nx serve map-aabb
-```
-
-To create a production bundle:
-
-```sh
-npx nx build map-aabb
-```
-
-## Run With Electron
-
-Install dependencies first:
+의존성 설치:
 
 ```sh
 npm install
 ```
 
-Run the React app inside Electron in development mode:
+웹 개발 서버 실행:
+
+```sh
+npm run dev:web
+```
+
+웹 프로덕션 빌드:
+
+```sh
+npm run build:web
+```
+
+Electron 개발 모드:
 
 ```sh
 npm run dev:electron
 ```
 
-Build the renderer and Electron main process:
-
-```sh
-npm run build:web
-npm run build:electron
-```
-
-Create a Windows desktop package:
+Electron 패키징:
 
 ```sh
 npm run package:electron
 ```
 
-The packaged app will be written to `dist-electron`.
+패키징 결과물은 `dist-electron`에 생성됩니다.
 
-To see all available targets to run for a project, run:
+## 구현 위치
 
-```sh
-npx nx show project map-aabb
-```
+- `map-aabb/src/app/app.tsx`: 3D 편집기 핵심 구현
+- `map-aabb/src/styles.css`: 전체 레이아웃 스타일
+- `electron/main.ts`: Electron 메인 프로세스
+- `electron/preload.ts`: Electron preload
 
-These targets are either [inferred automatically](https://nx.dev/concepts/inferred-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) or defined in the `project.json` or `package.json` files.
+## 3D 편집기 구조
 
-[More about running tasks in the docs &raquo;](https://nx.dev/features/run-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+이 편집기는 크게 두 레이어로 나뉩니다.
 
-## Add new projects
+1. 편집 레이어
+	지도 위에 SVG 오버레이를 띄워 꼭짓점, 선분 중간 핸들, 회전 핸들을 직접 조작합니다.
+2. 렌더 레이어
+	같은 footprint 데이터를 Three.js `ExtrudeGeometry`로 다시 만들어 MapLibre custom layer에서 3D로 그립니다.
 
-While you could add new projects to your workspace manually, you might want to leverage [Nx plugins](https://nx.dev/concepts/nx-plugins?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) and their [code generation](https://nx.dev/features/generate-code?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) feature.
+즉, 사용자는 2D 핸들을 조작하지만 내부 데이터는 하나이고, 그 데이터가 곧바로 3D 메쉬와 오버레이 양쪽에 반영됩니다.
 
-Use the plugin's generator to create new projects.
+## 데이터 모델
 
-To generate a new application, use:
+편집기의 상태는 두 축으로 나뉩니다.
 
-```sh
-npx nx g @nx/react:app demo
-```
+`ShapeState`
 
-To generate a new library, use:
+- `centerLng`, `centerLat`: 도형 중심의 지도 좌표
+- `rotationZ`: 도형 회전 각도
+- `heightMeters`: extrusion 높이
 
-```sh
-npx nx g @nx/react:lib mylib
-```
+`LocalPoint[]`
 
-You can use `npx nx list` to get a list of installed plugins. Then, run `npx nx list <plugin-name>` to learn about more specific capabilities of a particular plugin. Alternatively, [install Nx Console](https://nx.dev/getting-started/editor-setup?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) to browse plugins and generators in your IDE.
+- footprint를 이루는 점 목록
+- 각 점은 도형 중심 기준의 로컬 미터 좌표입니다
 
-[Learn more about Nx plugins &raquo;](https://nx.dev/concepts/nx-plugins?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) | [Browse the plugin registry &raquo;](https://nx.dev/plugin-registry?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+이 구조의 장점은 지도 좌표계와 도형 편집 좌표계를 분리할 수 있다는 점입니다. footprint는 항상 로컬 미터 단위로 다루고, 실제 지도 투영은 렌더링 직전에만 수행합니다.
 
-## Set up CI!
+## 좌표 변환 흐름
 
-### Step 1
+편집기 구현의 핵심은 로컬 좌표를 지도와 화면 좌표로 일관되게 바꾸는 것입니다.
 
-To connect to Nx Cloud, run the following command:
+1. footprint 점은 중심 기준 로컬 미터 좌표로 저장합니다.
+2. `rotatePoint()`로 회전 적용 후 MapLibre `MercatorCoordinate` 기준 좌표로 변환합니다.
+3. 필요할 때 `projectLocalPoint()`로 화면 픽셀 좌표를 계산합니다.
+4. SVG 오버레이와 Three.js 메쉬가 모두 같은 변환 규칙을 공유합니다.
 
-```sh
-npx nx connect
-```
+이 역할을 담당하는 주요 함수는 다음과 같습니다.
 
-Connecting to Nx Cloud ensures a [fast and scalable CI](https://nx.dev/ci/intro/why-nx-cloud?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects) pipeline. It includes features such as:
+- `getTransformModelData()`
+- `getWorldMercatorForLocalPoint()`
+- `projectLocalPoint()`
+- `buildOverlayGeometry()`
 
-- [Remote caching](https://nx.dev/ci/features/remote-cache?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [Task distribution across multiple machines](https://nx.dev/ci/features/distribute-task-execution?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [Automated e2e test splitting](https://nx.dev/ci/features/split-e2e-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [Task flakiness detection and rerunning](https://nx.dev/ci/features/flaky-tasks?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+## SVG 오버레이 편집 방식
 
-### Step 2
+사용자가 직접 조작하는 것은 Three 메쉬가 아니라 SVG 오버레이입니다.
 
-Use the following command to configure a CI workflow for your workspace:
+오버레이는 다음 요소로 구성됩니다.
 
-```sh
-npx nx g ci-workflow
-```
+- `polygon`: footprint 외곽선과 내부 드래그 영역
+- `circle`: 각 꼭짓점 편집 핸들
+- `segmentMidpoints`: 각 선분 중간에 생성되는 `+` 핸들
+- `rotationHandle`: 회전용 핸들
 
-[Learn more about Nx on CI](https://nx.dev/ci/intro/ci-with-nx#ready-get-started-with-your-provider?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+이 오버레이는 `buildOverlayGeometry()`에서 계산된 화면 좌표를 그대로 사용합니다. 즉, 메쉬와 오버레이가 서로 다른 데이터를 보는 것이 아니라 같은 데이터를 다른 방식으로 시각화합니다.
 
-## Install Nx Console
+## 사용자 입력 처리
 
-Nx Console is an editor extension that enriches your developer experience. It lets you run tasks, generate code, and improves code autocompletion in your IDE. It is available for VSCode and IntelliJ.
+편집 동작은 `DragState`를 기준으로 나뉩니다.
 
-[Install Nx Console &raquo;](https://nx.dev/getting-started/editor-setup?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+- `move-shape`: 도형 전체 이동
+- `vertex`: 특정 꼭짓점 이동
+- `rotate`: 회전
 
-## Useful links
+입력 처리 흐름은 다음과 같습니다.
 
-Learn more:
+1. `onPointerDown`에서 어떤 핸들을 잡았는지 `DragState`에 기록합니다.
+2. 전역 `pointermove` 이벤트에서 현재 포인터를 로컬 미터 좌표로 환산합니다.
+3. 상태를 갱신하는 함수로 footprint 또는 shape state를 업데이트합니다.
+4. 오버레이와 3D 메쉬를 다시 생성합니다.
 
-- [Learn more about this workspace setup](https://nx.dev/getting-started/tutorials/react-standalone-tutorial?utm_source=nx_project&amp;utm_medium=readme&amp;utm_campaign=nx_projects)
-- [Learn about Nx on CI](https://nx.dev/ci/intro/ci-with-nx?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [Releasing Packages with Nx release](https://nx.dev/features/manage-releases?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
-- [What are Nx plugins?](https://nx.dev/concepts/nx-plugins?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+관련 함수:
 
-And join the Nx community:
-- [Discord](https://go.nx.dev/community)
-- [Follow us on X](https://twitter.com/nxdevtools) or [LinkedIn](https://www.linkedin.com/company/nrwl)
-- [Our Youtube channel](https://www.youtube.com/@nxdevtools)
-- [Our blog](https://nx.dev/blog?utm_source=nx_project&utm_medium=readme&utm_campaign=nx_projects)
+- `getPointerMercator()`
+- `getPointerLocalMeters()`
+- `startDrag()`
+- `updateShapeState()`
+- `updateFootprint()`
+- `insertVertexAfter()`
+- `deleteSelectedVertex()`
+
+## 3D 메쉬 생성 방식
+
+3D는 Three.js `ExtrudeGeometry`를 사용합니다.
+
+1. footprint 배열로 `THREE.Shape`를 만듭니다.
+2. `createExtrudedGeometry()`에서 `depth = heightMeters`로 extrusion 합니다.
+3. `rebuildShapeGeometry()`에서 기존 메쉬와 엣지를 dispose하고 새 geometry로 교체합니다.
+4. 상단 면과 측면은 다른 `MeshStandardMaterial` 색상으로 렌더링합니다.
+5. 외곽선 강조를 위해 `EdgesGeometry`를 함께 생성합니다.
+
+이 방식 덕분에 점 추가, 점 삭제, 회전, 높이 변경이 모두 같은 재생성 경로로 처리됩니다.
+
+## MapLibre custom layer 연동
+
+Three.js는 별도 캔버스를 쓰지 않고 MapLibre가 제공하는 WebGL 컨텍스트를 재사용합니다.
+
+구현 흐름:
+
+1. `onAdd()`에서 `THREE.Scene`, `THREE.Camera`, `THREE.WebGLRenderer`, `THREE.Group`를 만듭니다.
+2. `render()`에서 MapLibre가 넘겨준 projection matrix에 로컬 mercator transform을 곱합니다.
+3. 그 결과를 `camera.projectionMatrix`에 넣고 Three scene을 렌더링합니다.
+4. map repaint를 다시 요청해 편집 중 프레임이 끊기지 않게 합니다.
+
+현재 프로젝트는 `maplibre-gl@4.7.1`을 사용합니다. v4 custom layer에서 `render` 시그니처는 `render(gl, matrix, options)`이며, v5의 `defaultProjectionData.mainMatrix` 방식과 다릅니다. 이 차이를 맞춰야 3D 메쉬가 정상적으로 보입니다.
+
+## 상태 갱신 전략
+
+렌더링과 편집이 꼬이지 않도록 React state와 ref를 함께 사용합니다.
+
+- 화면 표시용: `useState`
+- 이벤트 핸들러와 custom layer에서 즉시 참조할 최신값: `useRef`
+
+예를 들어 footprint와 shape state는 state와 ref를 동시에 유지하고, 포인터 이동 중에는 ref를 사용해 stale closure 문제를 피합니다.
+
+## 초기값과 리셋
+
+초기 도형은 `initialFootprint`와 `initialShapeState`로 정의되어 있습니다.
+
+- footprint: 5개의 비대칭 점으로 시작
+- rotation: `16deg`
+- height: `90000m`
+
+`resetEditor()`는 이 초기값으로 되돌리고 지도 카메라도 다시 맞춥니다.
+
+## 현재 제한사항
+
+- 자기 교차(self-intersection) 폴리곤은 extrusion 결과가 예상과 다를 수 있습니다
+- 홀(hole) 구조는 아직 지원하지 않습니다
+- 스냅, 좌표 직접 입력, 저장/불러오기 기능은 아직 없습니다
+- 편집 UI는 SVG 기반이라 고급 편집 툴처럼 제약 조건 편집은 아직 없습니다
+
+## 확장 아이디어
+
+- GeoJSON import/export
+- vertex snapping
+- hole 편집
+- 높이별 색상 규칙
+- 다중 도형 레이어
+- 선택/편집 히스토리와 undo/redo
+
+## 사용 기술
+
+- React 19
+- MapLibre GL JS 4.7.1
+- Three.js
+- Vite
+- Nx
+- Electron
