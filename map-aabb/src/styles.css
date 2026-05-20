@@ -1,0 +1,86 @@
+html,
+body,
+#root {
+	width: 100%;
+	height: 100%;
+	margin: 0;
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	overflow: hidden;
+	font-family: Arial, sans-serif;
+	background: #0f172a;
+}
+
+.app-shell {
+	position: relative;
+	width: 100vw;
+	height: 100vh;
+}
+
+.map-container {
+	width: 100%;
+	height: 100%;
+}
+
+.guide-panel {
+	position: absolute;
+	top: 16px;
+	right: 16px;
+	z-index: 10;
+	max-width: 360px;
+	padding: 14px 16px;
+	border: 1px solid rgba(148, 163, 184, 0.25);
+	border-radius: 12px;
+	background: rgba(15, 23, 42, 0.82);
+	color: #f8fafc;
+	font-size: 14px;
+	line-height: 1.5;
+	box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+	backdrop-filter: blur(10px);
+}
+
+.guide-title {
+	margin: 0 0 8px;
+	font-size: 18px;
+}
+
+.guide-text {
+	margin: 0 0 16px;
+	color: #e2e8f0;
+}
+
+.control-group {
+	display: flex;
+	flex-direction: column;
+	gap: 6px;
+	margin-bottom: 14px;
+}
+
+.control-label {
+	font-size: 13px;
+	color: #cbd5e1;
+}
+
+.control-group input[type='range'] {
+	width: 100%;
+}
+
+.reset-button {
+	width: 100%;
+	padding: 10px 12px;
+	border: 0;
+	border-radius: 10px;
+	background: #2563eb;
+	color: #eff6ff;
+	font-weight: 700;
+	cursor: pointer;
+}
+
+.reset-button:hover {
+	background: #1d4ed8;
+}
