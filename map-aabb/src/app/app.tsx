@@ -10,6 +10,8 @@ const HANDLE_RADIUS = 7;
 const ROTATION_HANDLE_OFFSET_METERS = 50000;
 const MIN_HEIGHT_METERS = 20000;
 const MAX_HEIGHT_METERS = 180000;
+const DEFAULT_CURVE_HANDLE_OFFSET_METERS = 24000;
+const MAX_CURVE_OFFSET_RATIO = 0.85;
 
 type LocalPoint = {
   x: number;
@@ -33,8 +35,20 @@ type ShapeState = {
   heightMeters: number;
 };
 
+type OutlineStyle = 'solid' | 'dashed' | 'dotted';
+
+type SegmentCurveState = {
+  curveOffset: number;
+};
+
 type OverlayVertex = ScreenPoint & { index: number };
 type OverlaySegment = ScreenPoint & { insertAfter: number };
+type OverlayCurveHandle = ScreenPoint & {
+  index: number;
+  anchorX: number;
+  anchorY: number;
+  curveOffset: number;
+};
 
 type OverlayGeometry = {
   center: ScreenPoint;
@@ -42,7 +56,8 @@ type OverlayGeometry = {
   rotationHandle: ScreenPoint;
   vertices: OverlayVertex[];
   segmentMidpoints: OverlaySegment[];
-  polygonPoints: string;
+  curveHandles: OverlayCurveHandle[];
+  pathData: string;
 };
 
 type DragState =
@@ -52,6 +67,10 @@ type DragState =
       startCenterMercator: MercatorPoint;
     }
   | { type: 'rotate' }
+  | {
+      type: 'curve';
+      index: number;
+    }
   | {
       type: 'vertex';
       index: number;
@@ -81,6 +100,17 @@ const initialFootprint: LocalPoint[] = [
   { x: -55000, y: -90000 },
 ];
 
+function createInitialSegmentCurves(length: number) {
+  return Array.from({ length }, () => ({ curveOffset: 0 }));
+}
+
+const initialSegmentCurves = createInitialSegmentCurves(initialFootprint.length);
+const outlineStyleOptions: Array<{ value: OutlineStyle; label: string }> = [
+  { value: 'solid', label: '실선' },
+  { value: 'dashed', label: '점선' },
+  { value: 'dotted', label: '점점선' },
+];
+
 function rotatePoint(point: LocalPoint, angleRad: number): LocalPoint {
   const cos = Math.cos(angleRad);
   const sin = Math.sin(angleRad);
@@ -93,6 +123,10 @@ function rotatePoint(point: LocalPoint, angleRad: number): LocalPoint {
 
 function normalizeDegrees(value: number) {
   return ((value + 180) % 360 + 360) % 360 - 180;
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
 }
 
 function getTransformModelData(shape: ShapeState) {
@@ -121,6 +155,92 @@ function getShapeExtents(points: LocalPoint[]) {
   );
 }
 
+function getSegmentMidpoint(start: LocalPoint, end: LocalPoint): LocalPoint {
+  return {
+    x: (start.x + end.x) / 2,
+    y: (start.y + end.y) / 2,
+  };
+}
+
+function getSegmentLength(start: LocalPoint, end: LocalPoint) {
+  return Math.hypot(end.x - start.x, end.y - start.y);
+}
+
+function getSegmentNormal(start: LocalPoint, end: LocalPoint) {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const length = Math.hypot(dx, dy) || 1;
+
+  return {
+    x: -dy / length,
+    y: dx / length,
+  };
+}
+
+function getCurveOffsetLimit(start: LocalPoint, end: LocalPoint) {
+  return getSegmentLength(start, end) * MAX_CURVE_OFFSET_RATIO;
+}
+
+function getCurveControlPoint(start: LocalPoint, end: LocalPoint, curveOffset: number): LocalPoint {
+  const midpoint = getSegmentMidpoint(start, end);
+  const normal = getSegmentNormal(start, end);
+
+  return {
+    x: midpoint.x + normal.x * curveOffset,
+    y: midpoint.y + normal.y * curveOffset,
+  };
+}
+
+function getCurveDisplayPoint(start: LocalPoint, end: LocalPoint, curveOffset: number) {
+  const segmentLength = getSegmentLength(start, end);
+  const defaultOffset = Math.min(DEFAULT_CURVE_HANDLE_OFFSET_METERS, segmentLength * 0.35);
+  const visibleOffset = Math.abs(curveOffset) < 1 ? defaultOffset : curveOffset;
+
+  return getCurveControlPoint(start, end, visibleOffset);
+}
+
+function getQuadraticPoint(start: LocalPoint, control: LocalPoint, end: LocalPoint, t: number): LocalPoint {
+  const mt = 1 - t;
+
+  return {
+    x: mt * mt * start.x + 2 * mt * t * control.x + t * t * end.x,
+    y: mt * mt * start.y + 2 * mt * t * control.y + t * t * end.y,
+  };
+}
+
+function getCurveOffsetFromControlPoint(start: LocalPoint, end: LocalPoint, controlPoint: LocalPoint) {
+  const midpoint = getSegmentMidpoint(start, end);
+  const normal = getSegmentNormal(start, end);
+
+  return (controlPoint.x - midpoint.x) * normal.x + (controlPoint.y - midpoint.y) * normal.y;
+}
+
+function getOutlineSvgDasharray(outlineStyle: OutlineStyle) {
+  if (outlineStyle === 'dashed') return '12 8';
+  if (outlineStyle === 'dotted') return '3 7';
+  return undefined;
+}
+
+function createOutlineMaterial(outlineStyle: OutlineStyle) {
+  if (outlineStyle === 'dashed') {
+    return new THREE.LineDashedMaterial({
+      color: 0x082f49,
+      dashSize: 22000,
+      gapSize: 14000,
+    });
+  }
+
+  if (outlineStyle === 'dotted') {
+    return new THREE.LineDashedMaterial({
+      color: 0x082f49,
+      dashSize: 3500,
+      gapSize: 11500,
+    });
+  }
+
+  return new THREE.LineBasicMaterial({ color: 0x082f49 });
+}
+
 function getWorldMercatorForLocalPoint(localPoint: LocalPoint, shape: ShapeState) {
   const modelData = getTransformModelData(shape);
   const rotatedPoint = rotatePoint(localPoint, THREE.MathUtils.degToRad(shape.rotationZ));
@@ -141,6 +261,7 @@ function projectLocalPoint(map: maplibregl.Map, localPoint: LocalPoint, shape: S
 function buildOverlayGeometry(
   map: maplibregl.Map,
   points: LocalPoint[],
+  segmentCurves: SegmentCurveState[],
   shape: ShapeState,
 ): OverlayGeometry {
   const vertices = points.map((point, index) => ({
@@ -149,19 +270,48 @@ function buildOverlayGeometry(
   }));
   const segmentMidpoints = points.map((point, index) => {
     const nextPoint = points[(index + 1) % points.length];
+    const curveOffset = segmentCurves[index]?.curveOffset ?? 0;
+    const controlPoint = getCurveControlPoint(point, nextPoint, curveOffset);
+    const curveMidpoint = Math.abs(curveOffset) < 1
+      ? getSegmentMidpoint(point, nextPoint)
+      : getQuadraticPoint(point, controlPoint, nextPoint, 0.5);
 
     return {
       insertAfter: index,
-      ...projectLocalPoint(
-        map,
-        {
-          x: (point.x + nextPoint.x) / 2,
-          y: (point.y + nextPoint.y) / 2,
-        },
-        shape,
-      ),
+      ...projectLocalPoint(map, curveMidpoint, shape),
     };
   });
+  const curveHandles = points.map((point, index) => {
+    const nextPoint = points[(index + 1) % points.length];
+    const curveOffset = segmentCurves[index]?.curveOffset ?? 0;
+    const anchorPoint = getSegmentMidpoint(point, nextPoint);
+    const handlePoint = getCurveDisplayPoint(point, nextPoint, curveOffset);
+    const projectedHandle = projectLocalPoint(map, handlePoint, shape);
+    const projectedAnchor = projectLocalPoint(map, anchorPoint, shape);
+
+    return {
+      index,
+      x: projectedHandle.x,
+      y: projectedHandle.y,
+      anchorX: projectedAnchor.x,
+      anchorY: projectedAnchor.y,
+      curveOffset,
+    };
+  });
+  const firstProjectedPoint = projectLocalPoint(map, points[0], shape);
+  const pathData = points.reduce((path, point, index) => {
+    const nextPoint = points[(index + 1) % points.length];
+    const projectedNextPoint = projectLocalPoint(map, nextPoint, shape);
+    const curveOffset = segmentCurves[index]?.curveOffset ?? 0;
+
+    if (Math.abs(curveOffset) < 1) {
+      return `${path} L ${projectedNextPoint.x} ${projectedNextPoint.y}`;
+    }
+
+    const controlPoint = getCurveControlPoint(point, nextPoint, curveOffset);
+    const projectedControlPoint = projectLocalPoint(map, controlPoint, shape);
+    return `${path} Q ${projectedControlPoint.x} ${projectedControlPoint.y} ${projectedNextPoint.x} ${projectedNextPoint.y}`;
+  }, `M ${firstProjectedPoint.x} ${firstProjectedPoint.y}`);
 
   const extents = getShapeExtents(points);
   const center = map.project([shape.centerLng, shape.centerLat]);
@@ -178,23 +328,38 @@ function buildOverlayGeometry(
     rotationHandle,
     vertices,
     segmentMidpoints,
-    polygonPoints: vertices.map((vertex) => `${vertex.x},${vertex.y}`).join(' '),
+    curveHandles,
+    pathData: `${pathData} Z`,
   };
 }
 
-function createExtrudedGeometry(points: LocalPoint[], heightMeters: number) {
+function createExtrudedGeometry(
+  points: LocalPoint[],
+  segmentCurves: SegmentCurveState[],
+  heightMeters: number,
+) {
   const shape = new THREE.Shape();
-  const [firstPoint, ...restPoints] = points;
+  const [firstPoint] = points;
 
   shape.moveTo(firstPoint.x, firstPoint.y);
-  restPoints.forEach((point) => shape.lineTo(point.x, point.y));
-  shape.lineTo(firstPoint.x, firstPoint.y);
+  points.forEach((point, index) => {
+    const nextPoint = points[(index + 1) % points.length];
+    const curveOffset = segmentCurves[index]?.curveOffset ?? 0;
+
+    if (Math.abs(curveOffset) < 1) {
+      shape.lineTo(nextPoint.x, nextPoint.y);
+      return;
+    }
+
+    const controlPoint = getCurveControlPoint(point, nextPoint, curveOffset);
+    shape.quadraticCurveTo(controlPoint.x, controlPoint.y, nextPoint.x, nextPoint.y);
+  });
 
   const geometry = new THREE.ExtrudeGeometry(shape, {
     depth: heightMeters,
     bevelEnabled: false,
     steps: 1,
-    curveSegments: 2,
+    curveSegments: 10,
   });
 
   geometry.computeVertexNormals();
@@ -218,23 +383,36 @@ export function App() {
   const dragStateRef = useRef<DragState | null>(null);
 
   const footprintRef = useRef<LocalPoint[]>(initialFootprint);
+  const segmentCurvesRef = useRef<SegmentCurveState[]>(initialSegmentCurves);
+  const outlineStyleRef = useRef<OutlineStyle>('solid');
   const shapeStateRef = useRef<ShapeState>(initialShapeState);
 
   const [footprint, setFootprint] = useState<LocalPoint[]>(initialFootprint);
+  const [segmentCurves, setSegmentCurves] = useState<SegmentCurveState[]>(initialSegmentCurves);
+  const [outlineStyle, setOutlineStyle] = useState<OutlineStyle>('solid');
   const [shapeState, setShapeState] = useState<ShapeState>(initialShapeState);
   const [overlay, setOverlay] = useState<OverlayGeometry | null>(null);
   const [selectedVertexIndex, setSelectedVertexIndex] = useState<number | null>(null);
   const [activeHandle, setActiveHandle] = useState<string | null>(null);
 
-  const syncOverlay = useCallback((nextShape = shapeStateRef.current, nextFootprint = footprintRef.current) => {
+  const syncOverlay = useCallback((
+    nextShape = shapeStateRef.current,
+    nextFootprint = footprintRef.current,
+    nextSegmentCurves = segmentCurvesRef.current,
+  ) => {
     const map = mapRef.current;
     if (!map) return;
 
-    setOverlay(buildOverlayGeometry(map, nextFootprint, nextShape));
+    setOverlay(buildOverlayGeometry(map, nextFootprint, nextSegmentCurves, nextShape));
   }, []);
 
   const rebuildShapeGeometry = useCallback(
-    (nextFootprint = footprintRef.current, nextHeightMeters = shapeStateRef.current.heightMeters) => {
+    (
+      nextFootprint = footprintRef.current,
+      nextSegmentCurves = segmentCurvesRef.current,
+      nextHeightMeters = shapeStateRef.current.heightMeters,
+      nextOutlineStyle = outlineStyleRef.current,
+    ) => {
       const layer = layerRef.current;
       if (!layer?.group) return;
 
@@ -258,7 +436,7 @@ export function App() {
       }
 
       // Rebuild the extruded footprint whenever vertices or height change.
-      const geometry = createExtrudedGeometry(nextFootprint, nextHeightMeters);
+      const geometry = createExtrudedGeometry(nextFootprint, nextSegmentCurves, nextHeightMeters);
       const topMaterial = new THREE.MeshStandardMaterial({
         color: 0x38bdf8,
         transparent: true,
@@ -281,9 +459,12 @@ export function App() {
 
       const edges = new THREE.LineSegments(
         new THREE.EdgesGeometry(geometry),
-        new THREE.LineBasicMaterial({ color: 0x082f49 }),
+        createOutlineMaterial(nextOutlineStyle),
       );
       edges.frustumCulled = false;
+      if (edges.material instanceof THREE.LineDashedMaterial) {
+        edges.computeLineDistances();
+      }
 
       layer.mesh = mesh;
       layer.edges = edges;
@@ -303,7 +484,12 @@ export function App() {
       syncOverlay(nextShape, footprintRef.current);
 
       if (patch.heightMeters !== undefined) {
-        rebuildShapeGeometry(footprintRef.current, nextShape.heightMeters);
+        rebuildShapeGeometry(
+          footprintRef.current,
+          segmentCurvesRef.current,
+          nextShape.heightMeters,
+          outlineStyleRef.current,
+        );
       }
 
       mapRef.current?.triggerRepaint();
@@ -312,14 +498,52 @@ export function App() {
   );
 
   const updateFootprint = useCallback(
-    (nextFootprint: LocalPoint[]) => {
+    (nextFootprint: LocalPoint[], nextSegmentCurves = segmentCurvesRef.current) => {
       footprintRef.current = nextFootprint;
+      segmentCurvesRef.current = nextSegmentCurves;
       setFootprint(nextFootprint);
-      syncOverlay(shapeStateRef.current, nextFootprint);
-      rebuildShapeGeometry(nextFootprint, shapeStateRef.current.heightMeters);
+      setSegmentCurves(nextSegmentCurves);
+      syncOverlay(shapeStateRef.current, nextFootprint, nextSegmentCurves);
+      rebuildShapeGeometry(
+        nextFootprint,
+        nextSegmentCurves,
+        shapeStateRef.current.heightMeters,
+        outlineStyleRef.current,
+      );
       mapRef.current?.triggerRepaint();
     },
     [rebuildShapeGeometry, syncOverlay],
+  );
+
+  const updateSegmentCurves = useCallback(
+    (nextSegmentCurves: SegmentCurveState[]) => {
+      segmentCurvesRef.current = nextSegmentCurves;
+      setSegmentCurves(nextSegmentCurves);
+      syncOverlay(shapeStateRef.current, footprintRef.current, nextSegmentCurves);
+      rebuildShapeGeometry(
+        footprintRef.current,
+        nextSegmentCurves,
+        shapeStateRef.current.heightMeters,
+        outlineStyleRef.current,
+      );
+      mapRef.current?.triggerRepaint();
+    },
+    [rebuildShapeGeometry, syncOverlay],
+  );
+
+  const updateOutlineStyle = useCallback(
+    (nextOutlineStyle: OutlineStyle) => {
+      outlineStyleRef.current = nextOutlineStyle;
+      setOutlineStyle(nextOutlineStyle);
+      rebuildShapeGeometry(
+        footprintRef.current,
+        segmentCurvesRef.current,
+        shapeStateRef.current.heightMeters,
+        nextOutlineStyle,
+      );
+      mapRef.current?.triggerRepaint();
+    },
+    [rebuildShapeGeometry],
   );
 
   const getPointerMercator = useCallback((clientX: number, clientY: number) => {
@@ -366,20 +590,32 @@ export function App() {
   const insertVertexAfter = useCallback(
     (insertAfter: number) => {
       const points = footprintRef.current;
+      const curves = segmentCurvesRef.current;
       const nextIndex = insertAfter + 1;
       const currentPoint = points[insertAfter];
       const nextPoint = points[(insertAfter + 1) % points.length];
-      const insertedPoint = {
-        x: (currentPoint.x + nextPoint.x) / 2,
-        y: (currentPoint.y + nextPoint.y) / 2,
-      };
+      const curveOffset = curves[insertAfter]?.curveOffset ?? 0;
+      const controlPoint = getCurveControlPoint(currentPoint, nextPoint, curveOffset);
+      const firstHalfControlPoint = getSegmentMidpoint(currentPoint, controlPoint);
+      const secondHalfControlPoint = getSegmentMidpoint(controlPoint, nextPoint);
+      const insertedPoint = getSegmentMidpoint(firstHalfControlPoint, secondHalfControlPoint);
       const nextFootprint = [
         ...points.slice(0, nextIndex),
         insertedPoint,
         ...points.slice(nextIndex),
       ];
+      const nextSegmentCurves = [
+        ...curves.slice(0, insertAfter),
+        {
+          curveOffset: getCurveOffsetFromControlPoint(currentPoint, insertedPoint, firstHalfControlPoint),
+        },
+        {
+          curveOffset: getCurveOffsetFromControlPoint(insertedPoint, nextPoint, secondHalfControlPoint),
+        },
+        ...curves.slice(insertAfter + 1),
+      ];
 
-      updateFootprint(nextFootprint);
+      updateFootprint(nextFootprint, nextSegmentCurves);
       setSelectedVertexIndex(nextIndex);
     },
     [updateFootprint],
@@ -388,8 +624,16 @@ export function App() {
   const deleteSelectedVertex = useCallback(() => {
     if (selectedVertexIndex === null || footprintRef.current.length <= 3) return;
 
+    const previousSegmentIndex = (
+      selectedVertexIndex - 1 + segmentCurvesRef.current.length
+    ) % segmentCurvesRef.current.length;
     const nextFootprint = footprintRef.current.filter((_, index) => index !== selectedVertexIndex);
-    updateFootprint(nextFootprint);
+    const nextSegmentCurves = segmentCurvesRef.current.flatMap((segmentCurve, index) => {
+      if (index === selectedVertexIndex) return [];
+      if (index === previousSegmentIndex) return [{ curveOffset: 0 }];
+      return [segmentCurve];
+    });
+    updateFootprint(nextFootprint, nextSegmentCurves);
     setSelectedVertexIndex((current) => {
       if (current === null) return null;
       return Math.min(current, nextFootprint.length - 1);
@@ -397,15 +641,23 @@ export function App() {
   }, [selectedVertexIndex, updateFootprint]);
 
   const resetEditor = useCallback(() => {
+    const nextSegmentCurves = createInitialSegmentCurves(initialFootprint.length);
     footprintRef.current = initialFootprint;
+    segmentCurvesRef.current = nextSegmentCurves;
     shapeStateRef.current = initialShapeState;
     setFootprint(initialFootprint);
+    setSegmentCurves(nextSegmentCurves);
     setShapeState(initialShapeState);
     setSelectedVertexIndex(null);
     setActiveHandle(null);
 
-    syncOverlay(initialShapeState, initialFootprint);
-    rebuildShapeGeometry(initialFootprint, initialShapeState.heightMeters);
+    syncOverlay(initialShapeState, initialFootprint, nextSegmentCurves);
+    rebuildShapeGeometry(
+      initialFootprint,
+      nextSegmentCurves,
+      initialShapeState.heightMeters,
+      outlineStyleRef.current,
+    );
 
     mapRef.current?.easeTo({
       center: INITIAL_CENTER,
@@ -452,6 +704,29 @@ export function App() {
         return;
       }
 
+      if (dragState.type === 'curve') {
+        const points = footprintRef.current;
+        const currentPoint = points[dragState.index];
+        const nextPoint = points[(dragState.index + 1) % points.length];
+        const midpoint = getSegmentMidpoint(currentPoint, nextPoint);
+        const normal = getSegmentNormal(currentPoint, nextPoint);
+        const offsetAlongNormal = (localPointer.x - midpoint.x) * normal.x
+          + (localPointer.y - midpoint.y) * normal.y;
+        const nextCurveOffset = clamp(
+          offsetAlongNormal,
+          -getCurveOffsetLimit(currentPoint, nextPoint),
+          getCurveOffsetLimit(currentPoint, nextPoint),
+        );
+        const nextSegmentCurves = segmentCurvesRef.current.map((segmentCurve, index) => (
+          index === dragState.index
+            ? { curveOffset: nextCurveOffset }
+            : segmentCurve
+        ));
+
+        updateSegmentCurves(nextSegmentCurves);
+        return;
+      }
+
       const nextFootprint = footprintRef.current.map((point, index) => (
         index === dragState.index ? localPointer : point
       ));
@@ -473,7 +748,7 @@ export function App() {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
-  }, [getPointerLocalMeters, getPointerMercator, updateFootprint, updateShapeState]);
+  }, [getPointerLocalMeters, getPointerMercator, updateFootprint, updateSegmentCurves, updateShapeState]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -622,6 +897,7 @@ export function App() {
 
   const selectedVertex = selectedVertexIndex === null ? null : footprint[selectedVertexIndex];
   const overlayStroke = 'rgba(14, 165, 233, 0.96)';
+  const overlayStrokeDasharray = getOutlineSvgDasharray(outlineStyle);
   const overlayFill = 'rgba(56, 189, 248, 0.12)';
 
   return (
@@ -634,10 +910,11 @@ export function App() {
           height="100%"
           style={{ position: 'absolute', inset: 0, zIndex: 9, overflow: 'visible', pointerEvents: 'none' }}
         >
-          <polygon
-            points={overlay.polygonPoints}
+          <path
+            d={overlay.pathData}
             fill={overlayFill}
             stroke={overlayStroke}
+            strokeDasharray={overlayStrokeDasharray}
             strokeWidth={2.5}
             vectorEffect="non-scaling-stroke"
             style={{
@@ -766,9 +1043,35 @@ export function App() {
         </h3>
         <p className="guide-text" style={{ fontSize: '13px', lineHeight: '1.6', color: '#334155' }}>
           도형 내부를 드래그하면 전체 이동, 꼭짓점을 드래그하면 선 모양이 바뀝니다.
-          선 중간의 <strong>+</strong> 핸들로 점을 추가하고, 선택된 점은 삭제할 수 있습니다.
+          아래 외곽선 스타일 버튼으로 실선, 점선, 점점선을 바꿀 수 있고,
+          선 중간의 <strong>+</strong> 핸들로 점을 추가할 수 있습니다. 선택된 점은 삭제할 수 있습니다.
           상단 회전 핸들로 회전하고, 아래 슬라이더로 3D 높이를 편집합니다.
         </p>
+
+        <div style={{ marginBottom: '14px' }}>
+          <label className="control-label" style={{ display: 'block', marginBottom: '6px', color: '#334155' }}>
+            외곽선 스타일
+          </label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px' }}>
+            {outlineStyleOptions.map((option) => (
+              <button
+                key={option.value}
+                onClick={() => updateOutlineStyle(option.value)}
+                style={{
+                  padding: '9px 10px',
+                  border: 'none',
+                  borderRadius: '8px',
+                  background: outlineStyle === option.value ? '#0f172a' : '#e2e8f0',
+                  color: outlineStyle === option.value ? '#ffffff' : '#0f172a',
+                  cursor: 'pointer',
+                  fontWeight: 700,
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
 
         <div style={{ marginBottom: '14px' }}>
           <label className="control-label" style={{ display: 'block', marginBottom: '6px', color: '#334155' }}>
@@ -824,6 +1127,7 @@ export function App() {
 
         <p className="guide-text" style={{ fontSize: '12px', lineHeight: '1.6', color: '#0f172a', marginBottom: '10px' }}>
           point count: <strong>{footprint.length}</strong><br />
+          outline style: <strong>{outlineStyle}</strong><br />
           selected point: <strong>{selectedVertexIndex === null ? '-' : selectedVertexIndex + 1}</strong><br />
           center: <strong>{shapeState.centerLng.toFixed(4)}, {shapeState.centerLat.toFixed(4)}</strong><br />
           rotation: <strong>{shapeState.rotationZ.toFixed(1)}deg</strong>
