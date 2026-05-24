@@ -74,6 +74,34 @@ npm run package:electron
 
 패키징 결과물은 `dist-electron`에 생성됩니다.
 
+## Word 문서 Markdown 변환
+
+루트 스크립트 `scripts/word-to-markdown.cjs`는 Word OOXML 문서(`.docx`, `.docm`, `.dotx`, `.dotm`)를 Markdown으로 변환합니다. 표는 Markdown 표로 바꾸고, 이미지는 별도 파일로 추출한 뒤 Markdown 이미지 링크로 연결합니다.
+
+기본 사용법:
+
+```sh
+npm run word:md -- ./docs/source.docx
+```
+
+출력 Markdown 파일을 직접 지정:
+
+```sh
+npm run word:md -- ./docs/source.docx ./out/source.md
+```
+
+이미지 출력 폴더까지 지정:
+
+```sh
+npm run word:md -- ./docs/source.docx ./out/source.md --images-dir ./out/source-assets
+```
+
+동작 방식:
+
+- 출력 파일을 생략하면 입력 파일과 같은 폴더에 같은 이름의 `.md` 파일을 만듭니다.
+- 이미지 폴더를 생략하면 Markdown 파일명 기준으로 `-assets` 폴더를 자동 생성합니다.
+- 구형 `.doc` 형식은 직접 지원하지 않으므로 Word에서 `.docx`로 다시 저장한 뒤 변환해야 합니다.
+
 ## 구현 위치
 
 - `map-aabb/src/app/app.tsx`: 3D 편집기 핵심 구현
