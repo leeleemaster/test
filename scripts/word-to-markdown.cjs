@@ -105,6 +105,22 @@ function flattenMarkdownForTableCell(markdown) {
   );
 }
 
+function getCellSpan(cell, attributeName) {
+  return Math.max(Number.parseInt(cell.getAttribute(attributeName) || '1', 10) || 1, 1);
+}
+
+function isMarkdownCompatibleTable(tableNode) {
+  return Array.from(tableNode.rows || []).every((row) => {
+    return Array.from(row.cells || []).every((cell) => {
+      const hasNestedTable = Boolean(cell.querySelector('table'));
+      const rowSpan = getCellSpan(cell, 'rowspan');
+      const colSpan = getCellSpan(cell, 'colspan');
+
+      return !hasNestedTable && rowSpan === 1 && colSpan === 1;
+    });
+  });
+}
+
 function getMarkdownTableRows(tableNode, turndownService) {
   const tableRows = Array.from(tableNode.rows || []);
 
@@ -113,7 +129,7 @@ function getMarkdownTableRows(tableNode, turndownService) {
 
     for (const cell of Array.from(row.cells || [])) {
       const content = flattenMarkdownForTableCell(turndownService.turndown(cell.innerHTML || ''));
-      const colspan = Math.max(Number.parseInt(cell.getAttribute('colspan') || '1', 10) || 1, 1);
+      const colspan = getCellSpan(cell, 'colspan');
 
       rowCells.push(content);
 
@@ -175,6 +191,10 @@ function createTurndownService() {
       return node.nodeName === 'TABLE';
     },
     replacement(content, node) {
+      if (!isMarkdownCompatibleTable(node)) {
+        return `\n\n${node.outerHTML}\n\n`;
+      }
+
       const tableMarkdown = renderMarkdownTable(node, service);
 
       return tableMarkdown ? `\n\n${tableMarkdown}\n\n` : '\n\n';
