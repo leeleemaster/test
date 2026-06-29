@@ -12,6 +12,26 @@
 
 ---
 
+## 전제: 두 프로젝트는 동일 환경
+
+이 체크리스트는 **두 프로젝트(레퍼런스 = 이 저장소, 분석 대상 = 그룹 도형 프로젝트)가 아래와 동일한 스택**이라는 전제로 작성되었습니다. 좌표계/각도/Y부호 규약은 이 스택을 기준으로 합니다. 그룹 프로젝트의 버전이 다르면 그 항목부터 의심하세요.
+
+| 패키지 | 버전 | 규약상 중요한 이유 |
+|---|---|---|
+| `maplibre-gl` | **4.7.1** | custom layer `render(gl, matrix)` 시그니처(v4 기준). `MercatorCoordinate` / `meterInMercatorCoordinateUnits()` / `project`·`unproject` 좌표 규약. **Mercator Y가 아래로(+)** → Y부호 반전·각도 처리의 근거. |
+| `three` | **0.183.x** | `ExtrudeGeometry`, `Matrix4`, `MathUtils.degToRad/radToDeg`, `Group.rotation.z`, `LineDashedMaterial`. |
+| `react` / `react-dom` | **19.x** | `useRef`/`useState` 이중화로 stale closure 회피(10장). |
+| `vite` | **7.x** | 빌드/HMR. |
+| `electron` | **35.x** | 데스크톱 패키징(좌표 규약과 무관). |
+| `nx` | **22.5.4** | 모노레포 태스크 러너. |
+| `typescript` | **5.9.x** | `DragState` 유니온 등 타입 규약. |
+
+- [ ] 그룹 프로젝트의 `maplibre-gl`이 **4.x(특히 4.7.1)** 인지 확인. **v5면** custom layer가 `render(gl, args)` + `args.defaultProjectionData.mainMatrix`로 바뀌어 9장 매트릭스 처리가 통째로 달라짐 → 이 경우 도형이 안 보이거나 어긋나는 1순위 원인.
+- [ ] 그룹 프로젝트도 **MapLibre의 Mercator Y-down** 좌표를 쓰는지 확인(같은 4.7.1이면 동일). 이게 1·3·4·8-A장 Y부호/각도 규약의 출발점.
+- [ ] `three` 메이저가 같은 계열(0.18x)인지 확인. `Matrix4`/`MathUtils` API는 이 범위에서 동일.
+
+---
+
 ## 0. TL;DR — 그룹 도형에서 깨지기 쉬운 5가지
 
 그룹 도형을 선택상자로 변형할 때 거의 항상 이 5곳에서 버그가 납니다. 먼저 여기부터 보세요.
