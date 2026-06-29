@@ -252,6 +252,35 @@
 - [ ] **이 레퍼런스의 올바른 처리**:
   - 회전값을 **매 프레임 포인터의 절대 각도로 직접 설정**한다(누적 delta 아님): `rotationZ = normalizeDegrees(radToDeg(atan2(local.y, local.x)) - 90)`. (`app.tsx:701`) → 분기점을 넘어도 도형 방향은 포인터를 그대로 따라가므로 시각적으로 연속.
   - `normalizeDegrees`가 **이중 모듈로**로 음수까지 안전하게 정규화: `((v + 180) % 360 + 360) % 360 - 180`. (`app.tsx:124`) → 단순 `v % 360` 은 음수에서 깨지므로 금지.
+
+  **실제 구현 코드 (`map-aabb/src/app/app.tsx`에서 그대로 발췌) — "일정 이상 회전하면 반대로 가는" 현상을 막는 핵심 부분:**
+
+  ```ts
+  // (1) 각도 정규화: 이중 모듈로라 음수/360 초과에서도 항상 -180~180 (app.tsx:124)
+  function normalizeDegrees(value: number) {
+    return ((value + 180) % 360 + 360) % 360 - 180;
+  }
+
+  // (2) 회전 핸들 드래그 처리 (전역 pointermove 안, app.tsx:700)
+  //  - 포인터를 '로컬 좌표'로 환산한 localPointer 사용 (getPointerLocalMeters에서 Y를 한 번 뒤집음)
+  //  - delta 누적이 아니라 '매 프레임 절대 각도'로 rotationZ를 직접 set → 분기점(±180)을 넘어도 안 튐
+  if (dragState.type === 'rotate') {
+    const angleRad = Math.atan2(localPointer.y, localPointer.x);
+    const rotationZ = normalizeDegrees(THREE.MathUtils.radToDeg(angleRad) - 90);
+    updateShapeState({ rotationZ });
+    return;
+  }
+
+  // (3) 위 localPointer를 만드는 역변환 — Y를 한 번 뒤집어 각도 부호까지 맞춤 (getPointerLocalMeters, app.tsx:563)
+  const localPoint = {
+    x:  (mercator.x - modelData.mercator.x) / modelData.scale,
+    y: -(mercator.y - modelData.mercator.y) / modelData.scale, // ← Y 반전 (각도 방향 정정)
+  };
+  return rotatePoint(localPoint, -THREE.MathUtils.degToRad(shapeStateRef.current.rotationZ));
+  ```
+
+  > 핵심: **(a)** `rotationZ`를 *누적*(`+=`)하지 않고 *절대값으로 set* 하므로 `atan2`의 ±180° 점프가 도형 방향에 영향을 주지 않고, **(b)** 그래도 저장 값은 `normalizeDegrees`로 항상 -180~180에 갇힌다. 이 둘이 "오른쪽으로 일정 이상 돌리면 왼쪽으로 튀는" 현상을 원천 차단한다.
+
 - [ ] **체크 포인트(누적 delta 버그)**: 그쪽 코드가 `newAngle = prevAngle + (curAngle - startAngle)` 또는 직전 포인터 각도와의 차이를 더하는 구조면, 경계 통과 시 점프를 **delta에 `normalizeDegrees`로 감싸** 보정하거나, 가능하면 **절대 각도 방식으로 전환**한다.
 - [ ] **체크 포인트(이동 시 wrap)**: 만약 "오른쪽으로 이동"(회전이 아니라 평행이동)에서 발생한다면, 이는 **경도 ±180°(antimeridian) 또는 Mercator X[0,1] wrap**. 이동은 7장처럼 Mercator delta로 처리하되, 결과 경도를 `((lng + 540) % 360) - 180`로 정규화하고 antimeridian 근처를 가드한다. (이 레퍼런스는 한국 영역 중심이라 미노출, 그룹 프로젝트의 이동 범위가 넓으면 노출될 수 있음.)
 
