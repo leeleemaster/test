@@ -13,6 +13,12 @@ const MAX_HEIGHT_METERS = 180000;
 const DEFAULT_CURVE_HANDLE_OFFSET_METERS = 24000;
 const MAX_CURVE_OFFSET_RATIO = 0.85;
 
+// 다른(그룹 도형) 프로젝트에서 보고된 회전 버그를 우리 프로젝트에 "동일하게" 재현하기 위한 플래그.
+//  true  → 그쪽 구조 재현(의도적 버그): ① rectangle map-mode 부호 반전, ② 로컬 회전 delta 누적 + 단순 정규화
+//  false → 레퍼런스 정상 경로(로컬 Y-up 단일 프레임 + 절대각 set + 이중 모듈로 정규화)
+// 이 플래그를 false로 바꾼 diff가 곧 그쪽 프로젝트의 "수정안"이다.
+const REPRODUCE_GROUP_PROJECT_BUGS = true;
+
 type LocalPoint = {
   x: number;
   y: number;
@@ -92,12 +98,12 @@ const initialShapeState: ShapeState = {
   heightMeters: 90000,
 };
 
+// 그쪽 버그가 가장 깔끔하게 드러나는 "사각형(rectangle)"으로 시작한다.
 const initialFootprint: LocalPoint[] = [
-  { x: -90000, y: 95000 },
-  { x: 35000, y: 115000 },
-  { x: 120000, y: 30000 },
-  { x: 90000, y: -105000 },
-  { x: -55000, y: -90000 },
+  { x: -95000, y: 70000 },
+  { x: 95000, y: 70000 },
+  { x: 95000, y: -70000 },
+  { x: -95000, y: -70000 },
 ];
 
 function createInitialSegmentCurves(length: number) {
@@ -381,6 +387,8 @@ export function App() {
   const layerRef = useRef<CustomShapeLayer | null>(null);
   const isMounted = useRef(false);
   const dragStateRef = useRef<DragState | null>(null);
+  // 버그 재현용: 직전 측정 각도(delta 누적 방식 재현). 정상 경로에서는 사용하지 않는다.
+  const prevRotateAngleRef = useRef<number | null>(null);
 
   const footprintRef = useRef<LocalPoint[]>(initialFootprint);
   const segmentCurvesRef = useRef<SegmentCurveState[]>(initialSegmentCurves);
@@ -698,9 +706,31 @@ export function App() {
       if (!localPointer) return;
 
       if (dragState.type === 'rotate') {
-        const angleRad = Math.atan2(localPointer.y, localPointer.x);
-        const rotationZ = normalizeDegrees(THREE.MathUtils.radToDeg(angleRad) - 90);
-        updateShapeState({ rotationZ });
+        const rawAngleDeg = THREE.MathUtils.radToDeg(Math.atan2(localPointer.y, localPointer.x)) - 90;
+
+        if (REPRODUCE_GROUP_PROJECT_BUGS) {
+          // ===== 다른 프로젝트 구조 재현 (의도적 버그) =====
+          // ① rectangle map-mode 부호 반전: 측정 각도에 -1 → 회전 방향이 포인터와 반대
+          const measured = -rawAngleDeg;
+
+          // ② 로컬 회전 delta 누적 + 단순 %360 정규화:
+          //    절대각 set이 아니라 이전 프레임 대비 delta를 더하고, 이중 모듈로가 아닌 단순 %360을 쓴다.
+          //    → atan2 ±180° 분기점을 넘을 때 delta가 튀어 "일정 이상 돌리면 반대로" 현상이 남는다.
+          if (prevRotateAngleRef.current === null) {
+            prevRotateAngleRef.current = measured;
+            return;
+          }
+          const delta = measured - prevRotateAngleRef.current;
+          prevRotateAngleRef.current = measured;
+          const accumulated = (shapeStateRef.current.rotationZ + delta) % 360; // 단순 %360 (음수 미보정)
+          updateShapeState({ rotationZ: accumulated });
+          return;
+        }
+
+        // ===== 레퍼런스 정상 경로 =====
+        // 로컬 Y-up 단일 프레임에서 측정 → 절대각으로 직접 set → 이중 모듈로 정규화.
+        // 부호 반전(-angle) 없음, delta 누적 없음.
+        updateShapeState({ rotationZ: normalizeDegrees(rawAngleDeg) });
         return;
       }
 
@@ -737,6 +767,7 @@ export function App() {
       if (!dragStateRef.current) return;
 
       dragStateRef.current = null;
+      prevRotateAngleRef.current = null;
       setActiveHandle(null);
       mapRef.current?.dragPan.enable();
     };
