@@ -19,7 +19,6 @@
   },
   "private": true,
   "dependencies": {
-    "@types/maplibre-gl": "^1.14.0",
     "@types/three": "^0.183.1",
     "emf-converter": "^1.1.1",
     "maplibre-gl": "^4.7.1",
