@@ -13,11 +13,11 @@ const MAX_HEIGHT_METERS = 180000;
 const DEFAULT_CURVE_HANDLE_OFFSET_METERS = 24000;
 const MAX_CURVE_OFFSET_RATIO = 0.85;
 
-// 다른(그룹 도형) 프로젝트에서 보고된 회전 버그를 우리 프로젝트에 "동일하게" 재현하기 위한 플래그.
-//  true  → 그쪽 구조 재현(의도적 버그): ① rectangle map-mode 부호 반전, ② 로컬 회전 delta 누적 + 단순 정규화
-//  false → 레퍼런스 정상 경로(로컬 Y-up 단일 프레임 + 절대각 set + 이중 모듈로 정규화)
-// 이 플래그를 false로 바꾼 diff가 곧 그쪽 프로젝트의 "수정안"이다.
-const REPRODUCE_GROUP_PROJECT_BUGS = true;
+// 다른(그룹 도형) 프로젝트에서 보고된 회전 버그를 우리 프로젝트에 "동일하게" 재현하기 위한 모드.
+//  재현 ON  → 그쪽 구조 재현(의도적 버그): ① rectangle map-mode 부호 반전, ② 로컬 회전 delta 누적 + 단순 정규화
+//  재현 OFF → 레퍼런스 정상 경로(로컬 Y-up 단일 프레임 + 절대각 set + 이중 모듈로 정규화)
+// UI 토글 버튼으로 실시간 비교 가능. 기본값은 ON(다른 프로젝트 동작 재현).
+const REPRODUCE_GROUP_PROJECT_BUGS_DEFAULT = true;
 
 type LocalPoint = {
   x: number;
@@ -402,6 +402,9 @@ export function App() {
   const [overlay, setOverlay] = useState<OverlayGeometry | null>(null);
   const [selectedVertexIndex, setSelectedVertexIndex] = useState<number | null>(null);
   const [activeHandle, setActiveHandle] = useState<string | null>(null);
+  // 버그 재현 모드(다른 프로젝트 동작). 시연용 런타임 토글.
+  const [reproduceBugs, setReproduceBugs] = useState(REPRODUCE_GROUP_PROJECT_BUGS_DEFAULT);
+  const reproduceBugsRef = useRef(REPRODUCE_GROUP_PROJECT_BUGS_DEFAULT);
 
   const syncOverlay = useCallback((
     nextShape = shapeStateRef.current,
@@ -708,7 +711,7 @@ export function App() {
       if (dragState.type === 'rotate') {
         const rawAngleDeg = THREE.MathUtils.radToDeg(Math.atan2(localPointer.y, localPointer.x)) - 90;
 
-        if (REPRODUCE_GROUP_PROJECT_BUGS) {
+        if (reproduceBugsRef.current) {
           // ===== 다른 프로젝트 구조 재현 (의도적 버그) =====
           // ① rectangle map-mode 부호 반전: 측정 각도에 -1 → 회전 방향이 포인터와 반대
           const measured = -rawAngleDeg;
@@ -1079,6 +1082,44 @@ export function App() {
           상단 회전 핸들로 회전하고, 아래 슬라이더로 3D 높이를 편집합니다.
         </p>
 
+        <div
+          style={{
+            marginBottom: '14px',
+            padding: '12px',
+            borderRadius: '10px',
+            background: reproduceBugs ? 'rgba(239, 68, 68, 0.10)' : 'rgba(16, 185, 129, 0.10)',
+            border: `1px solid ${reproduceBugs ? 'rgba(239, 68, 68, 0.45)' : 'rgba(16, 185, 129, 0.45)'}`,
+          }}
+        >
+          <label className="control-label" style={{ display: 'block', marginBottom: '6px', color: '#334155', fontWeight: 700 }}>
+            회전 버그 재현 (다른 프로젝트 동작)
+          </label>
+          <button
+            onClick={() => {
+              const next = !reproduceBugsRef.current;
+              reproduceBugsRef.current = next;
+              setReproduceBugs(next);
+            }}
+            style={{
+              width: '100%',
+              padding: '10px 12px',
+              border: 'none',
+              borderRadius: '8px',
+              background: reproduceBugs ? '#ef4444' : '#10b981',
+              color: '#ffffff',
+              cursor: 'pointer',
+              fontWeight: 700,
+            }}
+          >
+            {reproduceBugs ? '재현 ON — 버그 동작' : '재현 OFF — 정상 동작'}
+          </button>
+          <p className="guide-text" style={{ fontSize: '11.5px', lineHeight: '1.55', color: '#475569', margin: '8px 0 0' }}>
+            {reproduceBugs
+              ? '회전 핸들을 돌려보세요: ① 포인터와 반대로 돎(부호 반전), ② 일정 이상 돌리면 반대로 튐(delta 누적).'
+              : '정상: 절대각 + 이중 모듈로 정규화. 포인터를 그대로 따라오고 경계에서 안 튐.'}
+          </p>
+        </div>
+
         <div style={{ marginBottom: '14px' }}>
           <label className="control-label" style={{ display: 'block', marginBottom: '6px', color: '#334155' }}>
             외곽선 스타일
@@ -1161,7 +1202,8 @@ export function App() {
           outline style: <strong>{outlineStyle}</strong><br />
           selected point: <strong>{selectedVertexIndex === null ? '-' : selectedVertexIndex + 1}</strong><br />
           center: <strong>{shapeState.centerLng.toFixed(4)}, {shapeState.centerLat.toFixed(4)}</strong><br />
-          rotation: <strong>{shapeState.rotationZ.toFixed(1)}deg</strong>
+          rotation: <strong>{shapeState.rotationZ.toFixed(1)}deg</strong><br />
+          rotate mode: <strong>{reproduceBugs ? '재현(버그)' : '정상'}</strong>
         </p>
 
         {selectedVertex ? (

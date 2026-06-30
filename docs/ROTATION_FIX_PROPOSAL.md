@@ -7,8 +7,9 @@
 > - ① 사각형 map 모드에서 회전이 **반대로** (각도에 `-` 땜질)
 > - ② 일정 이상 돌리면 **반대로 튐** (각도 점프에서 wrap)
 >
-> **재현 데모**: `map-aabb/src/app/app.tsx`의 `REPRODUCE_GROUP_PROJECT_BUGS` 플래그.
-> `true`=버그 재현, `false`=정상(=이 설계안의 최종 형태).
+> **재현 데모**: `map-aabb`를 실행하면 우측 패널의 **"회전 버그 재현" 토글 버튼**으로 라이브 비교 가능.
+> (코드: `app.tsx`의 `reproduceBugs` 상태 / 기본값 `REPRODUCE_GROUP_PROJECT_BUGS_DEFAULT = true`.)
+> 재현 ON=버그(다른 프로젝트 동작), OFF=정상(=이 설계안의 최종 형태).
 
 ---
 
@@ -123,7 +124,7 @@
 | 이중 모듈로 정규화 | `normalizeDegrees` | 단순 `%360` 금지 |
 | 렌더 반사 1회 | `customLayer.render`의 `scale(s, -s, s)` | Y 반사 1곳 |
 | guide·shape 동일 변환 | `projectLocalPoint` (→ `map.project`) | 틸트 안전 |
-| 버그 재현/정상 토글 | `REPRODUCE_GROUP_PROJECT_BUGS` | `false` 분기 = 최종 수정 형태 |
+| 버그 재현/정상 토글 | `reproduceBugs` 상태 + UI 버튼 | OFF(정상) 분기 = 최종 수정 형태 |
 
 > **그쪽 최종 수정 = 레퍼런스에서 재현 플래그를 끈 회전 핸들러**(절대각 + `normalizeDegrees`, 반전·누적 없음)를 옮긴 것과 같다.
 
