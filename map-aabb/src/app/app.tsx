@@ -13,11 +13,18 @@ const MAX_HEIGHT_METERS = 180000;
 const DEFAULT_CURVE_HANDLE_OFFSET_METERS = 24000;
 const MAX_CURVE_OFFSET_RATIO = 0.85;
 
-// 다른(그룹 도형) 프로젝트에서 보고된 회전 버그를 우리 프로젝트에 "동일하게" 재현하기 위한 모드.
-//  재현 ON  → 그쪽 구조 재현(의도적 버그): ① rectangle map-mode 부호 반전, ② 로컬 회전 delta 누적 + 단순 정규화
-//  재현 OFF → 레퍼런스 정상 경로(로컬 Y-up 단일 프레임 + 절대각 set + 이중 모듈로 정규화)
-// UI 토글 버튼으로 실시간 비교 가능. 기본값은 ON(다른 프로젝트 동작 재현).
-const REPRODUCE_GROUP_PROJECT_BUGS_DEFAULT = true;
+// 다른(그룹 도형) 프로젝트 회전 버그의 재현/비교 모드.
+//  재현 ON  → 수정 전 동작 재현(의도적 버그): ① 커밋 경로의 불필요한 부호 반전, ② delta 누적 + 단순 %360
+//  재현 OFF → 정상 경로 = 그쪽 프로젝트에 실제 적용된 수정과 동일한 동작
+//
+// [그쪽 수정 확정 반영]
+//  - guide(selectFigureModify)의 screenGuideRotation = -guideRotation 은 필요한 변환이라 유지됨
+//  - geometry bake(applyRectangleGeometry)에 guide와 동일한 부호 변환을 추가 → guide/도형 각도 일치
+//  - 커밋(transformGroupRotateAngle)의 불필요한 이중 부호 반전 override 삭제 → 급점프·방향 반전 해소
+// 우리 레퍼런스는 guide(SVG)와 mesh(Three)가 같은 변환을 공유해 bake 누락 지점이 없고,
+// "이중 반전 삭제 + 연속 절대각 그대로 사용"은 아래 정상 경로가 이미 그 형태다.
+// → 같은 수정을 반영해 기본값을 OFF(정상)로 전환. 재현 브랜치는 회귀 비교용으로 유지.
+const REPRODUCE_GROUP_PROJECT_BUGS_DEFAULT = false;
 
 type LocalPoint = {
   x: number;
@@ -712,8 +719,9 @@ export function App() {
         const rawAngleDeg = THREE.MathUtils.radToDeg(Math.atan2(localPointer.y, localPointer.x)) - 90;
 
         if (reproduceBugsRef.current) {
-          // ===== 다른 프로젝트 구조 재현 (의도적 버그) =====
-          // ① rectangle map-mode 부호 반전: 측정 각도에 -1 → 회전 방향이 포인터와 반대
+          // ===== 수정 전 동작 재현 (의도적 버그) =====
+          // ① 커밋 경로의 불필요한 부호 반전 — 그쪽 transformGroupRotateAngle의 이중 반전에 대응.
+          //    (guide는 이미 올바른 연속값을 넘기는데 커밋에서 한 번 더 뒤집던 부분. 실제 수정에서 삭제됨)
           const measured = -rawAngleDeg;
 
           // ② 로컬 회전 delta 누적 + 단순 %360 정규화:
@@ -730,9 +738,9 @@ export function App() {
           return;
         }
 
-        // ===== 레퍼런스 정상 경로 =====
-        // 로컬 Y-up 단일 프레임에서 측정 → 절대각으로 직접 set → 이중 모듈로 정규화.
-        // 부호 반전(-angle) 없음, delta 누적 없음.
+        // ===== 정상 경로 (= 그쪽 프로젝트에 적용된 수정과 동일한 형태) =====
+        // 로컬 Y-up 단일 프레임에서 측정 → 연속 절대각을 그대로 set → 이중 모듈로 정규화.
+        // 커밋 경로의 부호 반전 없음(transformGroupRotateAngle override 삭제에 대응), delta 누적 없음.
         updateShapeState({ rotationZ: normalizeDegrees(rawAngleDeg) });
         return;
       }
@@ -1092,7 +1100,7 @@ export function App() {
           }}
         >
           <label className="control-label" style={{ display: 'block', marginBottom: '6px', color: '#334155', fontWeight: 700 }}>
-            회전 버그 재현 (다른 프로젝트 동작)
+            회전 버그 재현 (수정 전 동작 비교 — 수정 반영으로 기본 OFF)
           </label>
           <button
             onClick={() => {

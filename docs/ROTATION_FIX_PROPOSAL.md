@@ -8,8 +8,8 @@
 > - ② 일정 이상 돌리면 **반대로 튐** (각도 점프에서 wrap)
 >
 > **재현 데모**: `map-aabb`를 실행하면 우측 패널의 **"회전 버그 재현" 토글 버튼**으로 라이브 비교 가능.
-> (코드: `app.tsx`의 `reproduceBugs` 상태 / 기본값 `REPRODUCE_GROUP_PROJECT_BUGS_DEFAULT = true`.)
-> 재현 ON=버그(다른 프로젝트 동작), OFF=정상(=이 설계안의 최종 형태).
+> (코드: `app.tsx`의 `reproduceBugs` 상태 / 기본값 `REPRODUCE_GROUP_PROJECT_BUGS_DEFAULT = false` — **그쪽 수정 반영으로 기본 정상**.)
+> 재현 ON=수정 전 재현(회귀 비교용), OFF=정상(=그쪽에 실제 적용된 수정과 동일). 확정 원인·수정은 `ROTATION_FIX_FINDINGS.md` Finding #2.
 
 ---
 
