@@ -180,7 +180,12 @@
 
 ---
 
-## 부록 — 원본 문서 (`docs/old/`)
+## 부록 — 관련 문서
+
+**실행 편**: `ROTATION_FIX_IMPLEMENTATION.md` — 이 설계를 코드 작업으로 옮기는 워크시트 5종
+(① `-angle` (a)/(b) 분류 기준표, ② 커밋/읽기 함수 전수목록 템플릿, ③ arc/sector 역델타↔절대각 어댑터 설계, ④ guide 렌더 순서·가시성 분리 확인, ⑤ 도형별 마이그레이션 매핑 공식).
+
+### 원본 문서 (`docs/old/`)
 - `SELECTION_BOX_CHECKLIST.md` — 그쪽 AI용 질문지 + 규약 체크리스트 + 재현 데모
 - `ROTATION_FIX_DESIGN.md` — 수정 설계 원본
 - `ROTATION_FIX_RISKS.md` — 리스크 1~3 원본
