@@ -20,15 +20,20 @@
 
 **판정 규칙**: T1·T2·T3 중 2개 이상이 (a)를 가리키면 (a)로 처리. 애매하면 **(b)로 두고 보존**(제거는 되돌리기 어렵다) 후 재심사.
 
-### 처리 방법
-- **(a) 판정** → 그 `-` 삭제. 대신 경계 변환(`screenAngleToModel`/`modelAngleToRender`)이 부호를 담당하는지 확인. **같은 커밋**에서.
+### 처리 방법 — (a)는 두 하위 케이스로 나뉜다 (⚠️ 정적분석 반영)
+
+> **(a) 판정 = 무조건 삭제가 아니다.** 그 `-`가 파이프라인에서 **유일한 프레임 변환**인지, **중복 보정**인지에 따라 처방이 정반대다.
+> 구분 방법: **그 `-` 없이** 측정→렌더 파이프라인의 Y 반사를 센다. **홀수면 (a-2)** (그 `-`가 필요한 변환), **짝수면 (a-1)** (중복).
+
+- **(a-1) 중복 보정** (파이프라인에 변환이 이미 있는데 또 뒤집음) → 삭제. 경계 변환이 부호를 담당하는지 확인. **같은 커밋**에서.
+- **(a-2) 필요한 변환이 익명 인라인으로 존재** (두 프레임을 잇는 **유일한** 다리) → **삭제 금지. 승격(promotion)**: 부호는 그대로 두고, 이름 있는 경계 변환 함수로 **위치만 옮기는 동작 보존 리팩터**. 저장값·렌더 결과 불변이어야 함(골든으로 검증).
 - **(b) 판정** → 삭제 금지. geometry 레이어로 옮기고 **이름을 의미로** 바꾼다 (예: `-angle` → `sweepSign * angle`, `axisFlip`).
 
 ### 알려진 의심 지점 사전 분류 (그쪽 답변 기반 — audit으로 확정할 것)
 
 | 위치 | 예상 분류 | 근거 | 확정(기입) |
 |---|---|---|---|
-| rectangle map-mode 부호 반전 (`screen이 아니면 부호 뒤집음`) | **(a)** 유력 | 모드 분기 + 방향만 영향 | ☐ |
+| rectangle.ts map-mode 부호 반전 (`screen이 아니면 부호 뒤집음`) | **(a-2)** 유력 — **삭제 금지, 승격 대상** | **정적분석 결과**: mercator **Y-up delta 누적 프레임** ↔ **screen Y-down geometry bake 프레임**을 잇는 **필요한 변환**일 가능성 높음. 지금 지우면 새 버그. 홀짝 카운트로 확정 후 승격 | ◐ 정적분석 완료, 홀짝 확인 대기 |
 | ellipse visual↔model 반전 경로 | **(a)+(b) 혼재** 가능 | placement 반전은 (a), 장축 각도는 (b) | ☐ |
 | arc start/sweep 부호 | **(b)** 우선 의심 | geometry 의미 (벌어지는 방향) | ☐ |
 | sector delta 부호 (정규 delta 계약) | **(b)** 확인 필요 | delta 계약 자체가 방향 의미 포함 | ☐ |
@@ -141,7 +146,7 @@ toDeltaContract(prevAngle, nextAngle):
 
 | 도형 | placement 변환 | 고유(intrinsic) 값 변환 | 주의 |
 |---|---|---|---|
-| **rectangle** | `model = normalizeDeg(s_rect · stored + φ_rect)` | 없음 (크기·정점 불변) | v1이 map 반전 상태로 저장했으면 `s_rect = -1` 유력 |
+| **rectangle** | `model = normalizeDeg(s_rect · stored + φ_rect)` | 없음 (크기·정점 불변) | ⚠️ rectangle `-angle`이 **(a-2) 승격**으로 확정되면 동작 보존 리팩터라 저장값 불변 → `s_rect = +1` 유력. (1장 분류 결과가 이 상수를 결정 — 골든 비교로 최종 확정) |
 | **polygon** | placement 공식 동일 | 정점은 좌표라 불변 | **bounds contract 분기가 파생 각도를 저장했다면** 그 필드도 대상 (2장 표에서 확인) |
 | **ellipse** | placement 공식 동일 (`s_ell`) | `axis_new = normalizeDeg(s_axis · axis_old + φ_axis)` | placement와 axis의 **s가 다를 수 있음** — 따로 확정 |
 | **arc** | placement 공식 동일 (`s_arc_p`) | `start_new = normalizeDeg(s_arc · start_old + φ_arc)`, `sweep_new = s_sweep · sweep_old`, 볼록 플래그 그대로 | **s_sweep은 방향 계약** — 골든에서 벌어지는 방향으로 확정. placement·start·sweep의 s가 각각 다를 수 있음 |
