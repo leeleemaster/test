@@ -52,13 +52,30 @@ freeform 경로의 설계 자체("시작 상대점을 타깃 프레임으로 매
 
 ---
 
-## 4. 확정 시 수정 방향 (미리 합의용 — 적용은 확정 후)
+## 4. 수정 방향 — 2차 합의판 (그쪽 검토 반영)
 
-- [ ] **스냅샷 계약 도입**: 드래그 시작 시 `startGuideFrame`(박스+anchor)을 1회 확정하고 **드래그 내내 불변**. 타깃 프레임은 항상 `f(startGuideFrame, 현재 포인터, 핸들)`로 계산 — 매 프레임 독립(idempotent) → 왕복 시 원위치 복귀 보장.
-- [ ] **anchor 명시화**: freeform 경로에도 "반대변 고정"을 타깃 프레임 구성에서 **명시적으로** 박는다 (암묵 앵커 금지). 시작 프레임의 반대변 좌표를 그대로 타깃 프레임에 복사.
-- [ ] **bounds 재계산은 commit에만**: 드래그 중 "점→경계 재계산"이 guide 박스로 피드백되지 않게 차단. pointer-up에서만 박스 갱신.
-- [ ] 매핑 입력은 (이미 고정인) figure start state + startGuideFrame — 현재 상태를 입력으로 쓰지 않는다.
-- [ ] **검증**: `RESIZE_ANCHOR_ANALYSIS.md` 실험 1(0° bottom: top·left·right 불변) + 실험 2(왕복 복귀) + 실험 3(45°에서도 동일) 통과. 저장 라운드트립(commit 값 의미가 바뀌지 않는지)도 확인.
+> 1차 안에 대한 그쪽 검토 2건을 반영해 정정:
+> ① 패치는 freeform 매핑에만 넣으면 안 되고 **target guide frame 생성 + direct geometry 경로**를 함께 다시 잡아야 한다.
+> ② "드래그 중 bounds 재계산 금지"는 **"드래그 중 applied state를 입력으로 재사용 금지"** 로 재정식화해 구현한다.
+
+### 패치 범위 — 3지점 (freeform 단독 패치 금지)
+- [ ] **① target guide frame 생성 로직**: 프레임을 만드는 함수 자체가 `(startGuideFrame + 현재 포인터 + 핸들)`만 입력으로 받게. 생성 로직을 고쳐야 이 프레임을 소비하는 모든 경로가 함께 낫는다.
+- [ ] **② freeform 매핑 경로**: 시작 상대점 → (①에서 생성된) 타깃 프레임.
+- [ ] **③ direct geometry 경로**: guide 프레임 매핑을 거치지 않고 geometry를 직접 쓰는 경로도 **같은 입력 계약**(스냅샷 + 포인터)을 따르게. — Finding #2의 교훈과 동형: **한 경로만 고치면 나머지 경로로 증상이 계속 샌다** (guide/bake/commit → frame생성/freeform/direct).
+
+### 핵심 불변식 (재정식화)
+- [ ] ~~"드래그 중 bounds 재계산 금지"~~ → **"드래그 중 applied state를 입력으로 재사용 금지"**
+  - 재계산 **자체는 허용** (guide 표시용 bounds 갱신 등은 드래그 중에도 필요할 수 있음)
+  - 금지되는 것은 **출력→입력 간선**: 이번 드래그에서 적용된 결과(applied state, 재계산된 bounds)가 같은 드래그의 **다음 계산 입력**으로 들어가는 것
+  - 모든 계산의 입력은 오직: `startGuideFrame`(불변) + `figure start state`(불변) + 현재 포인터
+- [ ] **스냅샷 계약**: 드래그 시작 시 `startGuideFrame`(박스+anchor) 1회 확정, 드래그 내내 불변 → 매 프레임 독립(idempotent) → 왕복 시 원위치 복귀 보장.
+- [ ] **anchor 명시화**: 타깃 프레임 구성 시 시작 프레임의 반대변 좌표를 **그대로 복사** (암묵 앵커 금지).
+- [ ] **commit(pointer-up)에서만** applied 결과를 새 base로 승격 — 다음 드래그의 스냅샷은 그때 갱신된 base에서 뜬다.
+
+### 검증
+- [ ] `RESIZE_ANCHOR_ANALYSIS.md` 실험 1(0° bottom: top·left·right 불변) + 실험 2(왕복 복귀) + 실험 3(45° 동일) 통과.
+- [ ] **경로별 각각 검증**: ① frame 생성 ② freeform ③ direct geometry — **세 경로 모두** 실험 1~3 통과. 한 경로만 통과하고 끝내지 않는다.
+- [ ] 저장 라운드트립: commit 값 의미 불변 확인.
 
 > 원칙 재확인: 회전을 "절대각 set"으로 고친 것과 같은 원칙 — **변하는 자신을 참조한 증분이 아니라, 불변 스냅샷 기준의 절대 계산**. 이 프로젝트에서 세 번째로 확인되는 같은 계열이다 (회전 delta 누적 → 커밋 이중 반전 → 리사이즈 비고정 프레임).
 
