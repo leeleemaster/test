@@ -3,28 +3,47 @@ import maplibregl from 'maplibre-gl';
 import * as THREE from 'three';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
-const INITIAL_CENTER: [number, number] = [127.8, 36.2];
+const INITIAL_CENTER: [number, number] = [126.978, 37.5665];
+const ENABLE_MAP_SYMBOL_ICONS = false;
 const CUSTOM_LAYER_ID = 'shape-editor-layer';
+const OBSERVER_SYMBOL_SOURCE_ID = 'observer-symbol-source';
+const OBSERVER_SYMBOL_LAYER_ID = 'observer-symbol-layer';
+const OBSERVER_SYMBOL_IMAGE_ID = 'observer-symbol-image';
+const COMPARISON_CAT_SOURCE_ID = 'comparison-cat-source';
+const COMPARISON_CAT_LAYER_ID = 'comparison-cat-layer';
+const COMPARISON_CAT_IMAGE_ID = 'comparison-cat-image';
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
+const COMPARISON_CAT_IMAGE_URL = 'https://upload.wikimedia.org/wikipedia/commons/7/7c/201408_cat.png';
 const HANDLE_RADIUS = 7;
-const ROTATION_HANDLE_OFFSET_METERS = 50000;
-const MIN_HEIGHT_METERS = 20000;
-const MAX_HEIGHT_METERS = 180000;
-const DEFAULT_CURVE_HANDLE_OFFSET_METERS = 24000;
-const MAX_CURVE_OFFSET_RATIO = 0.85;
-
-// 다른(그룹 도형) 프로젝트 회전 버그의 재현/비교 모드.
-//  재현 ON  → 수정 전 동작 재현(의도적 버그): ① 커밋 경로의 불필요한 부호 반전, ② delta 누적 + 단순 %360
-//  재현 OFF → 정상 경로 = 그쪽 프로젝트에 실제 적용된 수정과 동일한 동작
-//
-// [그쪽 수정 확정 반영]
-//  - guide(selectFigureModify)의 screenGuideRotation = -guideRotation 은 필요한 변환이라 유지됨
-//  - geometry bake(applyRectangleGeometry)에 guide와 동일한 부호 변환을 추가 → guide/도형 각도 일치
-//  - 커밋(transformGroupRotateAngle)의 불필요한 이중 부호 반전 override 삭제 → 급점프·방향 반전 해소
-// 우리 레퍼런스는 guide(SVG)와 mesh(Three)가 같은 변환을 공유해 bake 누락 지점이 없고,
-// "이중 반전 삭제 + 연속 절대각 그대로 사용"은 아래 정상 경로가 이미 그 형태다.
-// → 같은 수정을 반영해 기본값을 OFF(정상)로 전환. 재현 브랜치는 회귀 비교용으로 유지.
-const REPRODUCE_GROUP_PROJECT_BUGS_DEFAULT = false;
+const TOP_HANDLE_RADIUS = 6;
+const ROTATION_HANDLE_OFFSET_METERS = 110;
+const MIN_HEIGHT_METERS = 30;
+const MAX_HEIGHT_METERS = 500;
+const ARC_SEGMENT_COUNT = 24;
+const MIN_RING_GAP = 30;
+const MIN_RING_DEPTH = 42;
+const ICON_DISTANCE_FROM_APEX_METERS = 42;
+const COMPARISON_CAT_OFFSET_METERS = 36;
+const ICON_TEXTURE_SIZE_PIXELS = 160;
+const OBSERVER_SYMBOL_IMAGE_SIZE_PIXELS = 400;
+const ICON_SIZE_FACTOR = 0.25;
+const ICON_SCREEN_SIZE_PIXELS = ICON_TEXTURE_SIZE_PIXELS * ICON_SIZE_FACTOR;
+const ICON_SCALE_SAMPLE_METERS = 1000;
+const IMAGE_ROTATE_HANDLE_OFFSET_PIXELS = 28;
+const IMAGE_RESIZE_HANDLE_RADIUS = 6;
+const IMAGE_MIN_SCALE = 0.45;
+const IMAGE_MAX_SCALE = 2.8;
+const ROUTE_LOOP_DURATION_MS = 36000;
+const DEFAULT_VIEW_ZOOM = 15.2;
+const DEFAULT_VIEW_PITCH = 72;
+const EDITOR_PRESET_VERSION = 'vehicle-nav-v2';
+const SHARED_ICON_SYMBOL_LAYOUT = {
+  'icon-size': ICON_SIZE_FACTOR,
+  'icon-allow-overlap': true,
+  'icon-ignore-placement': true,
+  'icon-pitch-alignment': 'viewport' as const,
+  'icon-rotation-alignment': 'viewport' as const,
+};
 
 type LocalPoint = {
   x: number;
@@ -48,29 +67,82 @@ type ShapeState = {
   heightMeters: number;
 };
 
-type OutlineStyle = 'solid' | 'dashed' | 'dotted';
-
-type SegmentCurveState = {
-  curveOffset: number;
+type RouteLngLat = {
+  lng: number;
+  lat: number;
 };
 
-type OverlayVertex = ScreenPoint & { index: number };
-type OverlaySegment = ScreenPoint & { insertAfter: number };
-type OverlayCurveHandle = ScreenPoint & {
-  index: number;
-  anchorX: number;
-  anchorY: number;
-  curveOffset: number;
+type RouteMetrics = {
+  cumulativeLengths: number[];
+  totalLengthMeters: number;
+};
+
+type RouteSample = RouteLngLat & {
+  rotationZ: number;
+};
+
+type RoutePlaybackState = {
+  isPlaying: boolean;
+  progressMeters: number;
+  loopDurationMs: number;
+};
+
+type OutlineStyle = 'solid' | 'dashed' | 'dotted';
+type IconRenderMode = 'shared-depth' | 'always-front';
+type RingHandleKey = 'apex' | 'left' | 'center' | 'right';
+type ImageShapeId = 'observer' | 'panel';
+type ImageShapeAltitudeMode = 'ground' | 'top';
+
+type SectorRing = Record<RingHandleKey, LocalPoint>;
+
+type ImageShape = {
+  id: ImageShapeId;
+  label: string;
+  imageHref: string;
+  localPoint: LocalPoint;
+  altitudeMode: ImageShapeAltitudeMode;
+  rotationDeg: number;
+  scale: number;
+  widthPixels: number;
+  heightPixels: number;
+};
+
+type ImageShapeMap = Record<ImageShapeId, ImageShape>;
+
+type ProjectedHandle = ScreenPoint & {
+  key: RingHandleKey;
+  ring: 'bottom' | 'top';
+  label: string;
+};
+
+type ProjectedImageShape = {
+  id: ImageShapeId;
+  label: string;
+  imageHref: string;
+  center: ScreenPoint;
+  topCenter: ScreenPoint;
+  rotateHandle: ScreenPoint;
+  resizeHandle: ScreenPoint;
+  widthPixels: number;
+  heightPixels: number;
+  rotationDeg: number;
+  altitudeMeters: number;
+  framePathData: string;
 };
 
 type OverlayGeometry = {
   center: ScreenPoint;
   rotationAnchor: ScreenPoint;
   rotationHandle: ScreenPoint;
-  vertices: OverlayVertex[];
-  segmentMidpoints: OverlaySegment[];
-  curveHandles: OverlayCurveHandle[];
-  pathData: string;
+  bottomPathData: string;
+  topPathData: string;
+  routePathData: string;
+  routeWaypointPoints: ScreenPoint[];
+  routeCursor: ScreenPoint;
+  bottomHandles: ProjectedHandle[];
+  topHandles: ProjectedHandle[];
+  imageShapes: ProjectedImageShape[];
+  verticalConnectors: Array<{ from: ScreenPoint; to: ScreenPoint }>;
 };
 
 type DragState =
@@ -79,14 +151,36 @@ type DragState =
       startPointerMercator: MercatorPoint;
       startCenterMercator: MercatorPoint;
     }
-  | { type: 'rotate' }
   | {
-      type: 'curve';
-      index: number;
+      type: 'rotate';
+      rotationOffsetDeg: number;
     }
   | {
-      type: 'vertex';
-      index: number;
+      type: 'ring-handle';
+      ring: 'bottom' | 'top';
+      key: RingHandleKey;
+    }
+  | {
+      type: 'image-move';
+      imageId: ImageShapeId;
+      altitudeMode: ImageShapeAltitudeMode;
+      pointerOffset: LocalPoint;
+      startPointerMercator?: MercatorPoint;
+      startCenterMercator?: MercatorPoint;
+      previousPointerMercator?: MercatorPoint;
+    }
+  | {
+      type: 'image-rotate';
+      imageId: ImageShapeId;
+      center: ScreenPoint;
+      rotationOffsetDeg: number;
+    }
+  | {
+      type: 'image-scale';
+      imageId: ImageShapeId;
+      center: ScreenPoint;
+      startDistance: number;
+      startScale: number;
     };
 
 type CustomShapeLayer = maplibregl.CustomLayerInterface & {
@@ -96,33 +190,87 @@ type CustomShapeLayer = maplibregl.CustomLayerInterface & {
   group?: THREE.Group;
   mesh?: THREE.Mesh;
   edges?: THREE.LineSegments;
+  iconSprite?: THREE.Sprite;
+  comparisonCatSprite?: THREE.Sprite;
+  observerGuide?: THREE.LineSegments;
+  iconTexture?: THREE.Texture;
+  comparisonCatTexture?: THREE.Texture;
 };
+
+const ringHandleKeys: RingHandleKey[] = ['apex', 'left', 'center', 'right'];
+const imageShapeIds: ImageShapeId[] = ['observer', 'panel'];
 
 const initialShapeState: ShapeState = {
   centerLng: INITIAL_CENTER[0],
   centerLat: INITIAL_CENTER[1],
   rotationZ: 16,
-  heightMeters: 90000,
+  heightMeters: 120,
 };
 
-// 그쪽 버그가 가장 깔끔하게 드러나는 "사각형(rectangle)"으로 시작한다.
-const initialFootprint: LocalPoint[] = [
-  { x: -95000, y: 70000 },
-  { x: 95000, y: 70000 },
-  { x: 95000, y: -70000 },
-  { x: -95000, y: -70000 },
+const demoRoutePoints: RouteLngLat[] = [
+  { lng: INITIAL_CENTER[0], lat: INITIAL_CENTER[1] },
+  { lng: 127.3845, lat: 36.3504 },
+  { lng: 128.1146, lat: 36.1196 },
+  { lng: 128.6014, lat: 35.8714 },
+  { lng: 129.0756, lat: 35.1796 },
+  { lng: 128.6014, lat: 35.8714 },
+  { lng: 127.3845, lat: 36.3504 },
+  { lng: INITIAL_CENTER[0], lat: INITIAL_CENTER[1] },
 ];
 
-function createInitialSegmentCurves(length: number) {
-  return Array.from({ length }, () => ({ curveOffset: 0 }));
-}
+const DEMO_ROUTE_METRICS = buildRouteMetrics(demoRoutePoints);
 
-const initialSegmentCurves = createInitialSegmentCurves(initialFootprint.length);
+const initialBottomRing: SectorRing = {
+  apex: { x: 0, y: -120 },
+  left: { x: -170, y: 60 },
+  center: { x: 0, y: 260 },
+  right: { x: 170, y: 60 },
+};
+
+const initialTopRing: SectorRing = {
+  apex: { x: 8, y: -28 },
+  left: { x: -105, y: 88 },
+  center: { x: 0, y: 195 },
+  right: { x: 120, y: 90 },
+};
+
 const outlineStyleOptions: Array<{ value: OutlineStyle; label: string }> = [
   { value: 'solid', label: '실선' },
   { value: 'dashed', label: '점선' },
   { value: 'dotted', label: '점점선' },
 ];
+
+const iconRenderModeOptions: Array<{ value: IconRenderMode; label: string }> = [
+  { value: 'shared-depth', label: '3D 깊이' },
+  { value: 'always-front', label: '항상 앞' },
+];
+
+function clonePoint(point: LocalPoint): LocalPoint {
+  return { x: point.x, y: point.y };
+}
+
+function cloneRing(ring: SectorRing): SectorRing {
+  return {
+    apex: clonePoint(ring.apex),
+    left: clonePoint(ring.left),
+    center: clonePoint(ring.center),
+    right: clonePoint(ring.right),
+  };
+}
+
+function cloneImageShape(shape: ImageShape): ImageShape {
+  return {
+    ...shape,
+    localPoint: clonePoint(shape.localPoint),
+  };
+}
+
+function cloneImageShapeMap(imageShapes: ImageShapeMap): ImageShapeMap {
+  return {
+    observer: cloneImageShape(imageShapes.observer),
+    panel: cloneImageShape(imageShapes.panel),
+  };
+}
 
 function rotatePoint(point: LocalPoint, angleRad: number): LocalPoint {
   const cos = Math.cos(angleRad);
@@ -142,74 +290,23 @@ function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
-function getTransformModelData(shape: ShapeState) {
-  const mercator = maplibregl.MercatorCoordinate.fromLngLat([shape.centerLng, shape.centerLat], 0);
+function getDistanceBetweenPoints(pointA: ScreenPoint, pointB: ScreenPoint) {
+  return Math.hypot(pointB.x - pointA.x, pointB.y - pointA.y);
+}
+
+function getAngleBetweenPointsDeg(center: ScreenPoint, point: ScreenPoint) {
+  return THREE.MathUtils.radToDeg(Math.atan2(point.y - center.y, point.x - center.x));
+}
+
+function getRotatedScreenPoint(center: ScreenPoint, offsetX: number, offsetY: number, rotationDeg: number) {
+  const angleRad = THREE.MathUtils.degToRad(rotationDeg);
+  const cos = Math.cos(angleRad);
+  const sin = Math.sin(angleRad);
 
   return {
-    mercator,
-    scale: mercator.meterInMercatorCoordinateUnits(),
+    x: center.x + offsetX * cos - offsetY * sin,
+    y: center.y + offsetX * sin + offsetY * cos,
   };
-}
-
-function getShapeExtents(points: LocalPoint[]) {
-  return points.reduce(
-    (acc, point) => ({
-      minX: Math.min(acc.minX, point.x),
-      maxX: Math.max(acc.maxX, point.x),
-      minY: Math.min(acc.minY, point.y),
-      maxY: Math.max(acc.maxY, point.y),
-    }),
-    {
-      minX: Number.POSITIVE_INFINITY,
-      maxX: Number.NEGATIVE_INFINITY,
-      minY: Number.POSITIVE_INFINITY,
-      maxY: Number.NEGATIVE_INFINITY,
-    },
-  );
-}
-
-function getSegmentMidpoint(start: LocalPoint, end: LocalPoint): LocalPoint {
-  return {
-    x: (start.x + end.x) / 2,
-    y: (start.y + end.y) / 2,
-  };
-}
-
-function getSegmentLength(start: LocalPoint, end: LocalPoint) {
-  return Math.hypot(end.x - start.x, end.y - start.y);
-}
-
-function getSegmentNormal(start: LocalPoint, end: LocalPoint) {
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const length = Math.hypot(dx, dy) || 1;
-
-  return {
-    x: -dy / length,
-    y: dx / length,
-  };
-}
-
-function getCurveOffsetLimit(start: LocalPoint, end: LocalPoint) {
-  return getSegmentLength(start, end) * MAX_CURVE_OFFSET_RATIO;
-}
-
-function getCurveControlPoint(start: LocalPoint, end: LocalPoint, curveOffset: number): LocalPoint {
-  const midpoint = getSegmentMidpoint(start, end);
-  const normal = getSegmentNormal(start, end);
-
-  return {
-    x: midpoint.x + normal.x * curveOffset,
-    y: midpoint.y + normal.y * curveOffset,
-  };
-}
-
-function getCurveDisplayPoint(start: LocalPoint, end: LocalPoint, curveOffset: number) {
-  const segmentLength = getSegmentLength(start, end);
-  const defaultOffset = Math.min(DEFAULT_CURVE_HANDLE_OFFSET_METERS, segmentLength * 0.35);
-  const visibleOffset = Math.abs(curveOffset) < 1 ? defaultOffset : curveOffset;
-
-  return getCurveControlPoint(start, end, visibleOffset);
 }
 
 function getQuadraticPoint(start: LocalPoint, control: LocalPoint, end: LocalPoint, t: number): LocalPoint {
@@ -221,11 +318,117 @@ function getQuadraticPoint(start: LocalPoint, control: LocalPoint, end: LocalPoi
   };
 }
 
-function getCurveOffsetFromControlPoint(start: LocalPoint, end: LocalPoint, controlPoint: LocalPoint) {
-  const midpoint = getSegmentMidpoint(start, end);
-  const normal = getSegmentNormal(start, end);
+function getTransformModelData(shape: ShapeState) {
+  const mercator = maplibregl.MercatorCoordinate.fromLngLat([shape.centerLng, shape.centerLat], 0);
 
-  return (controlPoint.x - midpoint.x) * normal.x + (controlPoint.y - midpoint.y) * normal.y;
+  return {
+    mercator,
+    scale: mercator.meterInMercatorCoordinateUnits(),
+  };
+}
+
+function getRingExtents(ring: SectorRing) {
+  return ringHandleKeys.reduce(
+    (acc, key) => ({
+      minX: Math.min(acc.minX, ring[key].x),
+      maxX: Math.max(acc.maxX, ring[key].x),
+      minY: Math.min(acc.minY, ring[key].y),
+      maxY: Math.max(acc.maxY, ring[key].y),
+    }),
+    {
+      minX: Number.POSITIVE_INFINITY,
+      maxX: Number.NEGATIVE_INFINITY,
+      minY: Number.POSITIVE_INFINITY,
+      maxY: Number.NEGATIVE_INFINITY,
+    },
+  );
+}
+
+function getCombinedExtents(bottomRing: SectorRing, topRing: SectorRing) {
+  const bottomExtents = getRingExtents(bottomRing);
+  const topExtents = getRingExtents(topRing);
+
+  return {
+    minX: Math.min(bottomExtents.minX, topExtents.minX),
+    maxX: Math.max(bottomExtents.maxX, topExtents.maxX),
+    minY: Math.min(bottomExtents.minY, topExtents.minY),
+    maxY: Math.max(bottomExtents.maxY, topExtents.maxY),
+  };
+}
+
+function sanitizeSectorRing(inputRing: SectorRing): SectorRing {
+  const ring = cloneRing(inputRing);
+
+  ring.left.y = Math.max(ring.left.y, ring.apex.y + MIN_RING_DEPTH);
+  ring.right.y = Math.max(ring.right.y, ring.apex.y + MIN_RING_DEPTH);
+  ring.center.y = Math.max(ring.center.y, ring.apex.y + MIN_RING_DEPTH * 1.35);
+
+  if (ring.left.x > ring.right.x - MIN_RING_GAP * 2) {
+    const midpoint = (ring.left.x + ring.right.x) / 2;
+    ring.left.x = midpoint - MIN_RING_GAP;
+    ring.right.x = midpoint + MIN_RING_GAP;
+  }
+
+  ring.left.x = Math.min(ring.left.x, ring.center.x - MIN_RING_GAP);
+  ring.right.x = Math.max(ring.right.x, ring.center.x + MIN_RING_GAP);
+  ring.center.x = clamp(ring.center.x, ring.left.x + MIN_RING_GAP, ring.right.x - MIN_RING_GAP);
+
+  const minArcY = Math.min(ring.left.y, ring.center.y, ring.right.y);
+  ring.apex.y = Math.min(ring.apex.y, minArcY - MIN_RING_DEPTH);
+  ring.apex.x = clamp(
+    ring.apex.x,
+    ring.left.x + MIN_RING_GAP * 0.25,
+    ring.right.x - MIN_RING_GAP * 0.25,
+  );
+
+  return ring;
+}
+
+function getRingDirection(ring: SectorRing) {
+  const dx = ring.center.x - ring.apex.x;
+  const dy = ring.center.y - ring.apex.y;
+  const length = Math.hypot(dx, dy) || 1;
+
+  return {
+    x: dx / length,
+    y: dy / length,
+  };
+}
+
+function sampleOuterArc(ring: SectorRing, segmentCount = ARC_SEGMENT_COUNT) {
+  return Array.from({ length: segmentCount + 1 }, (_, index) => (
+    getQuadraticPoint(ring.left, ring.center, ring.right, index / segmentCount)
+  ));
+}
+
+function createSectorPolygon(ring: SectorRing) {
+  return [ring.apex, ...sampleOuterArc(ring)];
+}
+
+function buildPathData(points: ScreenPoint[]) {
+  if (points.length === 0) return '';
+
+  return points.reduce(
+    (path, point, index) => (
+      index === 0
+        ? `M ${point.x} ${point.y}`
+        : `${path} L ${point.x} ${point.y}`
+    ),
+    '',
+  ) + ' Z';
+}
+
+function buildOpenPathData(points: ScreenPoint[]) {
+  if (points.length === 0) return '';
+
+  return points.reduce(
+    (path, point, index) => (
+      index === 0
+        ? `M ${point.x} ${point.y}`
+        : `${path} L ${point.x} ${point.y}`
+    ),
+    '',
+  );
 }
 
 function getOutlineSvgDasharray(outlineStyle: OutlineStyle) {
@@ -238,144 +441,338 @@ function createOutlineMaterial(outlineStyle: OutlineStyle) {
   if (outlineStyle === 'dashed') {
     return new THREE.LineDashedMaterial({
       color: 0x082f49,
-      dashSize: 22000,
-      gapSize: 14000,
+      dashSize: 40,
+      gapSize: 24,
     });
   }
 
   if (outlineStyle === 'dotted') {
     return new THREE.LineDashedMaterial({
       color: 0x082f49,
-      dashSize: 3500,
-      gapSize: 11500,
+      dashSize: 6,
+      gapSize: 20,
     });
   }
 
   return new THREE.LineBasicMaterial({ color: 0x082f49 });
 }
 
-function getWorldMercatorForLocalPoint(localPoint: LocalPoint, shape: ShapeState) {
-  const modelData = getTransformModelData(shape);
-  const rotatedPoint = rotatePoint(localPoint, THREE.MathUtils.degToRad(shape.rotationZ));
+function createObserverIconCanvas(sizePixels = ICON_TEXTURE_SIZE_PIXELS) {
+  const canvas = document.createElement('canvas');
+  canvas.width = sizePixels;
+  canvas.height = sizePixels;
+
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return null;
+  }
+
+  const scale = sizePixels / ICON_TEXTURE_SIZE_PIXELS;
+  const scaled = (value: number) => value * scale;
+
+  context.clearRect(0, 0, canvas.width, canvas.height);
+
+  context.fillStyle = 'rgba(15, 23, 42, 0.16)';
+  context.beginPath();
+  context.ellipse(scaled(82), scaled(100), scaled(36), scaled(15), 0, 0, Math.PI * 2);
+  context.fill();
+
+  context.fillStyle = '#ffffff';
+  context.strokeStyle = '#0f172a';
+  context.lineWidth = scaled(8);
+  context.beginPath();
+  context.moveTo(scaled(34), scaled(82));
+  context.quadraticCurveTo(scaled(80), scaled(26), scaled(126), scaled(82));
+  context.quadraticCurveTo(scaled(80), scaled(132), scaled(34), scaled(82));
+  context.closePath();
+  context.fill();
+  context.stroke();
+
+  const irisGradient = context.createRadialGradient(
+    scaled(92),
+    scaled(82),
+    scaled(8),
+    scaled(92),
+    scaled(82),
+    scaled(28),
+  );
+  irisGradient.addColorStop(0, '#38bdf8');
+  irisGradient.addColorStop(1, '#0369a1');
+  context.fillStyle = irisGradient;
+  context.beginPath();
+  context.arc(scaled(92), scaled(82), scaled(24), 0, Math.PI * 2);
+  context.fill();
+
+  context.fillStyle = '#0f172a';
+  context.beginPath();
+  context.arc(scaled(92), scaled(82), scaled(10), 0, Math.PI * 2);
+  context.fill();
+
+  context.fillStyle = 'rgba(255,255,255,0.8)';
+  context.beginPath();
+  context.arc(scaled(86), scaled(73), scaled(5), 0, Math.PI * 2);
+  context.fill();
+
+  return canvas;
+}
+
+function createObserverIconTexture() {
+  const canvas = createObserverIconCanvas();
+  if (!canvas) {
+    const fallback = new THREE.DataTexture(new Uint8Array([255, 255, 255, 255]), 1, 1);
+    fallback.colorSpace = THREE.SRGBColorSpace;
+    fallback.needsUpdate = true;
+    return fallback;
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function createObserverIconDataUrl() {
+  const canvas = createObserverIconCanvas(OBSERVER_SYMBOL_IMAGE_SIZE_PIXELS);
+  return canvas ? canvas.toDataURL('image/png') : '';
+}
+
+function createPanelImageHref() {
+  const svg = `
+    <svg xmlns="http://www.w3.org/2000/svg" width="280" height="180" viewBox="0 0 280 180">
+      <defs>
+        <linearGradient id="cardFill" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#f8fafc" />
+          <stop offset="100%" stop-color="#dbeafe" />
+        </linearGradient>
+      </defs>
+      <rect x="10" y="12" width="260" height="156" rx="26" fill="#0f172a" opacity="0.16" />
+      <rect x="8" y="8" width="264" height="160" rx="26" fill="url(#cardFill)" stroke="#0f172a" stroke-width="8" />
+      <rect x="26" y="28" width="228" height="12" rx="6" fill="#38bdf8" opacity="0.85" />
+      <rect x="26" y="52" width="124" height="12" rx="6" fill="#0f172a" opacity="0.2" />
+      <text x="28" y="112" font-size="54" font-family="Segoe UI, Arial, sans-serif" font-weight="700" fill="#0f172a">FAN</text>
+      <text x="30" y="144" font-size="24" font-family="Segoe UI, Arial, sans-serif" fill="#334155">overlay image</text>
+    </svg>`;
+
+  return `data:image/svg+xml;charset=UTF-8,${encodeURIComponent(svg)}`;
+}
+
+function createSpriteTextureFromImage(source: CanvasImageSource | ImageData) {
+  const canvas = document.createElement('canvas');
+
+  if (source instanceof ImageData) {
+    canvas.width = source.width;
+    canvas.height = source.height;
+    const context = canvas.getContext('2d');
+    if (!context) {
+      return undefined;
+    }
+
+    context.putImageData(source, 0, 0);
+  } else {
+    const width = 'videoWidth' in source ? source.videoWidth : source.width;
+    const height = 'videoHeight' in source ? source.videoHeight : source.height;
+
+    if (!width || !height) {
+      return undefined;
+    }
+
+    canvas.width = width;
+    canvas.height = height;
+
+    const context = canvas.getContext('2d');
+    if (!context) {
+      return undefined;
+    }
+
+    context.drawImage(source, 0, 0, width, height);
+  }
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function createObserverIconImageData() {
+  const canvas = createObserverIconCanvas(OBSERVER_SYMBOL_IMAGE_SIZE_PIXELS);
+  if (!canvas) {
+    return new ImageData(new Uint8ClampedArray([255, 255, 255, 255]), 1, 1);
+  }
+
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return new ImageData(new Uint8ClampedArray([255, 255, 255, 255]), 1, 1);
+  }
+
+  return context.getImageData(0, 0, canvas.width, canvas.height);
+}
+
+function createIconSprite(
+  texture: THREE.Texture,
+  localPoint: LocalPoint,
+  iconRenderMode: IconRenderMode,
+) {
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: iconRenderMode === 'shared-depth',
+    depthWrite: false,
+    sizeAttenuation: true,
+  });
+
+  const sprite = new THREE.Sprite(material);
+  sprite.position.set(
+    localPoint.x,
+    localPoint.y,
+    0,
+  );
+  sprite.scale.set(ICON_SCREEN_SIZE_PIXELS, ICON_SCREEN_SIZE_PIXELS, 1);
+  sprite.renderOrder = iconRenderMode === 'always-front' ? 8 : 3;
+  sprite.frustumCulled = false;
+
+  return sprite;
+}
+
+function projectLocalPointToScreen(
+  localPoint: THREE.Vector3,
+  group: THREE.Group,
+  camera: THREE.Camera,
+  canvas: HTMLCanvasElement,
+) {
+  const worldPoint = localPoint.clone().applyMatrix4(group.matrixWorld);
+  const clipPoint = new THREE.Vector4(worldPoint.x, worldPoint.y, worldPoint.z, 1).applyMatrix4(camera.projectionMatrix);
+
+  if (!Number.isFinite(clipPoint.w) || Math.abs(clipPoint.w) < 1e-6) {
+    return null;
+  }
+
+  const ndcX = clipPoint.x / clipPoint.w;
+  const ndcY = clipPoint.y / clipPoint.w;
+  const width = canvas.clientWidth || canvas.width;
+  const height = canvas.clientHeight || canvas.height;
 
   return {
-    x: modelData.mercator.x + rotatedPoint.x * modelData.scale,
-    y: modelData.mercator.y - rotatedPoint.y * modelData.scale,
+    x: (ndcX * 0.5 + 0.5) * width,
+    y: (-ndcY * 0.5 + 0.5) * height,
   };
 }
 
-function projectLocalPoint(map: maplibregl.Map, localPoint: LocalPoint, shape: ShapeState): ScreenPoint {
-  const worldMercator = getWorldMercatorForLocalPoint(localPoint, shape);
-  const point = map.project(new maplibregl.MercatorCoordinate(worldMercator.x, worldMercator.y, 0).toLngLat());
-
-  return { x: point.x, y: point.y };
-}
-
-function buildOverlayGeometry(
-  map: maplibregl.Map,
-  points: LocalPoint[],
-  segmentCurves: SegmentCurveState[],
-  shape: ShapeState,
-): OverlayGeometry {
-  const vertices = points.map((point, index) => ({
-    index,
-    ...projectLocalPoint(map, point, shape),
-  }));
-  const segmentMidpoints = points.map((point, index) => {
-    const nextPoint = points[(index + 1) % points.length];
-    const curveOffset = segmentCurves[index]?.curveOffset ?? 0;
-    const controlPoint = getCurveControlPoint(point, nextPoint, curveOffset);
-    const curveMidpoint = Math.abs(curveOffset) < 1
-      ? getSegmentMidpoint(point, nextPoint)
-      : getQuadraticPoint(point, controlPoint, nextPoint, 0.5);
-
-    return {
-      insertAfter: index,
-      ...projectLocalPoint(map, curveMidpoint, shape),
-    };
-  });
-  const curveHandles = points.map((point, index) => {
-    const nextPoint = points[(index + 1) % points.length];
-    const curveOffset = segmentCurves[index]?.curveOffset ?? 0;
-    const anchorPoint = getSegmentMidpoint(point, nextPoint);
-    const handlePoint = getCurveDisplayPoint(point, nextPoint, curveOffset);
-    const projectedHandle = projectLocalPoint(map, handlePoint, shape);
-    const projectedAnchor = projectLocalPoint(map, anchorPoint, shape);
-
-    return {
-      index,
-      x: projectedHandle.x,
-      y: projectedHandle.y,
-      anchorX: projectedAnchor.x,
-      anchorY: projectedAnchor.y,
-      curveOffset,
-    };
-  });
-  const firstProjectedPoint = projectLocalPoint(map, points[0], shape);
-  const pathData = points.reduce((path, point, index) => {
-    const nextPoint = points[(index + 1) % points.length];
-    const projectedNextPoint = projectLocalPoint(map, nextPoint, shape);
-    const curveOffset = segmentCurves[index]?.curveOffset ?? 0;
-
-    if (Math.abs(curveOffset) < 1) {
-      return `${path} L ${projectedNextPoint.x} ${projectedNextPoint.y}`;
-    }
-
-    const controlPoint = getCurveControlPoint(point, nextPoint, curveOffset);
-    const projectedControlPoint = projectLocalPoint(map, controlPoint, shape);
-    return `${path} Q ${projectedControlPoint.x} ${projectedControlPoint.y} ${projectedNextPoint.x} ${projectedNextPoint.y}`;
-  }, `M ${firstProjectedPoint.x} ${firstProjectedPoint.y}`);
-
-  const extents = getShapeExtents(points);
-  const center = map.project([shape.centerLng, shape.centerLat]);
-  const rotationAnchor = projectLocalPoint(map, { x: 0, y: extents.maxY }, shape);
-  const rotationHandle = projectLocalPoint(
-    map,
-    { x: 0, y: extents.maxY + ROTATION_HANDLE_OFFSET_METERS },
-    shape,
+function syncIconSpriteScale(
+  sprite: THREE.Sprite,
+  group: THREE.Group,
+  camera: THREE.Camera,
+  canvas: HTMLCanvasElement,
+) {
+  const centerPoint = projectLocalPointToScreen(sprite.position, group, camera, canvas);
+  const xSamplePoint = projectLocalPointToScreen(
+    sprite.position.clone().add(new THREE.Vector3(ICON_SCALE_SAMPLE_METERS, 0, 0)),
+    group,
+    camera,
+    canvas,
+  );
+  const ySamplePoint = projectLocalPointToScreen(
+    sprite.position.clone().add(new THREE.Vector3(0, ICON_SCALE_SAMPLE_METERS, 0)),
+    group,
+    camera,
+    canvas,
   );
 
-  return {
-    center: { x: center.x, y: center.y },
-    rotationAnchor,
-    rotationHandle,
-    vertices,
-    segmentMidpoints,
-    curveHandles,
-    pathData: `${pathData} Z`,
-  };
+  if (!centerPoint || !xSamplePoint || !ySamplePoint) {
+    return;
+  }
+
+  const xPixels = Math.hypot(xSamplePoint.x - centerPoint.x, xSamplePoint.y - centerPoint.y);
+  const yPixels = Math.hypot(ySamplePoint.x - centerPoint.x, ySamplePoint.y - centerPoint.y);
+  const pixelsPerMeter = ((xPixels + yPixels) / 2) / ICON_SCALE_SAMPLE_METERS;
+
+  if (!Number.isFinite(pixelsPerMeter) || pixelsPerMeter <= 1e-6) {
+    return;
+  }
+
+  const iconSizeMeters = ICON_SCREEN_SIZE_PIXELS / pixelsPerMeter;
+  sprite.scale.set(iconSizeMeters, iconSizeMeters, 1);
 }
 
-function createExtrudedGeometry(
-  points: LocalPoint[],
-  segmentCurves: SegmentCurveState[],
+function createObserverGuide(
+  iconPosition: THREE.Vector3,
+  bottomRing: SectorRing,
+  topRing: SectorRing,
   heightMeters: number,
+  iconRenderMode: IconRenderMode,
 ) {
-  const shape = new THREE.Shape();
-  const [firstPoint] = points;
+  const shoulder = new THREE.Vector3(
+    bottomRing.apex.x,
+    bottomRing.apex.y,
+    Math.max(heightMeters * 0.12, 10),
+  );
 
-  shape.moveTo(firstPoint.x, firstPoint.y);
-  points.forEach((point, index) => {
-    const nextPoint = points[(index + 1) % points.length];
-    const curveOffset = segmentCurves[index]?.curveOffset ?? 0;
+  const targetAltitude = Math.max(heightMeters * 0.62, 18);
+  const targets = [topRing.left, topRing.center, topRing.right].map((point) => (
+    new THREE.Vector3(point.x, point.y, targetAltitude)
+  ));
 
-    if (Math.abs(curveOffset) < 1) {
-      shape.lineTo(nextPoint.x, nextPoint.y);
-      return;
-    }
-
-    const controlPoint = getCurveControlPoint(point, nextPoint, curveOffset);
-    shape.quadraticCurveTo(controlPoint.x, controlPoint.y, nextPoint.x, nextPoint.y);
+  const positions: number[] = [];
+  targets.forEach((target) => {
+    positions.push(iconPosition.x, iconPosition.y, iconPosition.z, shoulder.x, shoulder.y, shoulder.z);
+    positions.push(shoulder.x, shoulder.y, shoulder.z, target.x, target.y, target.z);
   });
 
-  const geometry = new THREE.ExtrudeGeometry(shape, {
-    depth: heightMeters,
-    bevelEnabled: false,
-    steps: 1,
-    curveSegments: 10,
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+
+  const material = new THREE.LineBasicMaterial({
+    color: 0xf97316,
+    transparent: true,
+    opacity: 0.72,
+    depthTest: iconRenderMode === 'shared-depth',
+    depthWrite: false,
   });
 
+  const guide = new THREE.LineSegments(geometry, material);
+  guide.renderOrder = iconRenderMode === 'always-front' ? 7 : 2;
+  guide.frustumCulled = false;
+  return guide;
+}
+
+function createSectorGeometry(bottomRing: SectorRing, topRing: SectorRing, heightMeters: number) {
+  const bottomContour = createSectorPolygon(bottomRing);
+  const topContour = createSectorPolygon(topRing);
+
+  const bottomVectors = bottomContour.map((point) => new THREE.Vector2(point.x, point.y));
+  if (THREE.ShapeUtils.isClockWise(bottomVectors)) {
+    bottomContour.reverse();
+    topContour.reverse();
+    bottomVectors.reverse();
+  }
+
+  const positions: number[] = [];
+  bottomContour.forEach((point) => positions.push(point.x, point.y, 0));
+  topContour.forEach((point) => positions.push(point.x, point.y, heightMeters));
+
+  const topOffset = bottomContour.length;
+  const capIndices: number[] = [];
+  const sideIndices: number[] = [];
+  const triangles = THREE.ShapeUtils.triangulateShape(bottomVectors, []);
+
+  triangles.forEach(([a, b, c]) => {
+    capIndices.push(c, b, a);
+    capIndices.push(topOffset + a, topOffset + b, topOffset + c);
+  });
+
+  for (let index = 0; index < bottomContour.length; index += 1) {
+    const nextIndex = (index + 1) % bottomContour.length;
+
+    sideIndices.push(index, nextIndex, topOffset + nextIndex);
+    sideIndices.push(index, topOffset + nextIndex, topOffset + index);
+  }
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geometry.setIndex([...capIndices, ...sideIndices]);
+  geometry.addGroup(0, capIndices.length, 0);
+  geometry.addGroup(capIndices.length, sideIndices.length, 1);
   geometry.computeVertexNormals();
+  geometry.computeBoundingSphere();
   return geometry;
 }
 
@@ -388,48 +785,448 @@ function disposeMaterial(material: THREE.Material | THREE.Material[]) {
   material.dispose();
 }
 
+function getObserverIconLocalPoint(bottomRing: SectorRing): LocalPoint {
+  const direction = getRingDirection(bottomRing);
+
+  return {
+    x: bottomRing.apex.x - direction.x * ICON_DISTANCE_FROM_APEX_METERS,
+    y: bottomRing.apex.y - direction.y * ICON_DISTANCE_FROM_APEX_METERS,
+  };
+}
+
+function getComparisonCatLocalPoint(bottomRing: SectorRing): LocalPoint {
+  const iconPoint = getObserverIconLocalPoint(bottomRing);
+  const direction = getRingDirection(bottomRing);
+
+  return {
+    x: iconPoint.x + direction.y * COMPARISON_CAT_OFFSET_METERS,
+    y: iconPoint.y - direction.x * COMPARISON_CAT_OFFSET_METERS,
+  };
+}
+
+function getImageShapeAltitude(imageShape: ImageShape, shape: ShapeState) {
+  return imageShape.altitudeMode === 'top' ? shape.heightMeters : 0;
+}
+
+function getImageShapeDisplayRotation(shape: ShapeState, imageShape: ImageShape) {
+  return normalizeDegrees(shape.rotationZ + imageShape.rotationDeg);
+}
+
+function createInitialImageShapes(observerImageHref: string, panelImageHref: string): ImageShapeMap {
+  return {
+    observer: {
+      id: 'observer',
+      label: '관찰 아이콘',
+      imageHref: observerImageHref,
+      localPoint: getObserverIconLocalPoint(initialBottomRing),
+      altitudeMode: 'ground',
+      rotationDeg: 0,
+      scale: 1,
+      widthPixels: 58,
+      heightPixels: 58,
+    },
+    panel: {
+      id: 'panel',
+      label: '이미지 카드',
+      imageHref: panelImageHref,
+      localPoint: { x: 0, y: 150 },
+      altitudeMode: 'top',
+      rotationDeg: -10,
+      scale: 0.82,
+      widthPixels: 108,
+      heightPixels: 68,
+    },
+  };
+}
+
+function projectLngLatToScreen(map: maplibregl.Map, point: RouteLngLat): ScreenPoint {
+  const projectedPoint = map.project([point.lng, point.lat]);
+
+  return {
+    x: projectedPoint.x,
+    y: projectedPoint.y,
+  };
+}
+
+function getLocalMetersBetweenLngLat(start: RouteLngLat, end: RouteLngLat): LocalPoint {
+  const averageLatRad = THREE.MathUtils.degToRad((start.lat + end.lat) * 0.5);
+  const metersPerDegreeLng = 111320 * Math.cos(averageLatRad);
+  const metersPerDegreeLat = 110540;
+
+  return {
+    x: (end.lng - start.lng) * metersPerDegreeLng,
+    y: (end.lat - start.lat) * metersPerDegreeLat,
+  };
+}
+
+function getDistanceBetweenLngLat(start: RouteLngLat, end: RouteLngLat) {
+  const delta = getLocalMetersBetweenLngLat(start, end);
+  return Math.hypot(delta.x, delta.y);
+}
+
+function buildRouteMetrics(routePoints: RouteLngLat[]): RouteMetrics {
+  const cumulativeLengths = [0];
+
+  for (let index = 0; index < routePoints.length - 1; index += 1) {
+    cumulativeLengths.push(
+      cumulativeLengths[index] + getDistanceBetweenLngLat(routePoints[index], routePoints[index + 1]),
+    );
+  }
+
+  return {
+    cumulativeLengths,
+    totalLengthMeters: cumulativeLengths[cumulativeLengths.length - 1] ?? 0,
+  };
+}
+
+function sampleRouteAtDistance(
+  routePoints: RouteLngLat[],
+  routeMetrics: RouteMetrics,
+  distanceMeters: number,
+): RouteSample {
+  if (routePoints.length < 2 || routeMetrics.totalLengthMeters <= 0) {
+    return {
+      ...routePoints[0],
+      rotationZ: initialShapeState.rotationZ,
+    };
+  }
+
+  const normalizedDistance = ((distanceMeters % routeMetrics.totalLengthMeters) + routeMetrics.totalLengthMeters)
+    % routeMetrics.totalLengthMeters;
+  let segmentIndex = routeMetrics.cumulativeLengths.length - 2;
+
+  for (let index = 0; index < routeMetrics.cumulativeLengths.length - 1; index += 1) {
+    if (normalizedDistance <= routeMetrics.cumulativeLengths[index + 1]) {
+      segmentIndex = index;
+      break;
+    }
+  }
+
+  const segmentStartDistance = routeMetrics.cumulativeLengths[segmentIndex];
+  const segmentEndDistance = routeMetrics.cumulativeLengths[segmentIndex + 1];
+  const segmentDistance = segmentEndDistance - segmentStartDistance;
+  const segmentProgress = segmentDistance <= 1e-6
+    ? 0
+    : (normalizedDistance - segmentStartDistance) / segmentDistance;
+  const startPoint = routePoints[segmentIndex];
+  const endPoint = routePoints[segmentIndex + 1];
+  const headingVector = getLocalMetersBetweenLngLat(startPoint, endPoint);
+
+  return {
+    lng: THREE.MathUtils.lerp(startPoint.lng, endPoint.lng, segmentProgress),
+    lat: THREE.MathUtils.lerp(startPoint.lat, endPoint.lat, segmentProgress),
+    rotationZ: Math.hypot(headingVector.x, headingVector.y) <= 1
+      ? initialShapeState.rotationZ
+      : getRotationFromModelPoint(headingVector),
+  };
+}
+
+function localPointToLngLat(localPoint: LocalPoint, shape: ShapeState) {
+  const modelData = getTransformModelData(shape);
+  const rotatedPoint = rotatePoint(localPoint, THREE.MathUtils.degToRad(shape.rotationZ));
+
+  return new maplibregl.MercatorCoordinate(
+    modelData.mercator.x + rotatedPoint.x * modelData.scale,
+    modelData.mercator.y - rotatedPoint.y * modelData.scale,
+    modelData.mercator.z,
+  ).toLngLat();
+}
+
+function getRotationFromModelPoint(point: LocalPoint) {
+  return normalizeDegrees(THREE.MathUtils.radToDeg(Math.atan2(point.y, point.x)) - 90);
+}
+
+function projectLocalPoint(
+  map: maplibregl.Map,
+  localPoint: LocalPoint,
+  altitudeMeters: number,
+  shape: ShapeState,
+  projectionMatrixArray?: number[] | null,
+): ScreenPoint {
+  if (!projectionMatrixArray || projectionMatrixArray.length !== 16) {
+    const modelData = getTransformModelData(shape);
+    const rotatedPoint = rotatePoint(localPoint, THREE.MathUtils.degToRad(shape.rotationZ));
+    const point = map.project(new maplibregl.MercatorCoordinate(
+      modelData.mercator.x + rotatedPoint.x * modelData.scale,
+      modelData.mercator.y - rotatedPoint.y * modelData.scale,
+      modelData.mercator.z + altitudeMeters * modelData.scale,
+    ).toLngLat());
+
+    return { x: point.x, y: point.y };
+  }
+
+  const modelData = getTransformModelData(shape);
+  const rotatedPoint = rotatePoint(localPoint, THREE.MathUtils.degToRad(shape.rotationZ));
+  const worldPoint = new THREE.Vector4(
+    modelData.mercator.x + rotatedPoint.x * modelData.scale,
+    modelData.mercator.y - rotatedPoint.y * modelData.scale,
+    modelData.mercator.z + altitudeMeters * modelData.scale,
+    1,
+  ).applyMatrix4(new THREE.Matrix4().fromArray(projectionMatrixArray));
+
+  if (!Number.isFinite(worldPoint.w) || Math.abs(worldPoint.w) < 1e-6) {
+    return { x: -9999, y: -9999 };
+  }
+
+  const ndcX = worldPoint.x / worldPoint.w;
+  const ndcY = worldPoint.y / worldPoint.w;
+  const width = map.getCanvas().clientWidth || map.getCanvas().width;
+  const height = map.getCanvas().clientHeight || map.getCanvas().height;
+
+  return {
+    x: (ndcX * 0.5 + 0.5) * width,
+    y: (-ndcY * 0.5 + 0.5) * height,
+  };
+}
+
+function buildOverlayGeometry(
+  map: maplibregl.Map,
+  bottomRing: SectorRing,
+  topRing: SectorRing,
+  shape: ShapeState,
+  imageShapes: ImageShapeMap,
+  projectionMatrixArray?: number[] | null,
+): OverlayGeometry {
+  const projectedRoutePoints = demoRoutePoints.map((point) => projectLngLatToScreen(map, point));
+  const bottomProjectedPathPoints = createSectorPolygon(bottomRing).map((point) => (
+    projectLocalPoint(map, point, 0, shape, projectionMatrixArray)
+  ));
+
+  const topProjectedPathPoints = createSectorPolygon(topRing).map((point) => (
+    projectLocalPoint(map, point, shape.heightMeters, shape, projectionMatrixArray)
+  ));
+
+  const bottomHandles = ringHandleKeys.map((key) => ({
+    ring: 'bottom' as const,
+    key,
+    label: `bottom-${key}`,
+    ...projectLocalPoint(map, bottomRing[key], 0, shape, projectionMatrixArray),
+  }));
+
+  const topHandles = ringHandleKeys.map((key) => ({
+    ring: 'top' as const,
+    key,
+    label: `top-${key}`,
+    ...projectLocalPoint(map, topRing[key], shape.heightMeters, shape, projectionMatrixArray),
+  }));
+
+  const verticalConnectors = ringHandleKeys.map((key) => ({
+    from: projectLocalPoint(map, bottomRing[key], 0, shape, projectionMatrixArray),
+    to: projectLocalPoint(map, topRing[key], shape.heightMeters, shape, projectionMatrixArray),
+  }));
+
+  const projectedImageShapes = imageShapeIds.map((imageId) => {
+    const imageShape = imageShapes[imageId];
+    const altitudeMeters = getImageShapeAltitude(imageShape, shape);
+    const center = projectLocalPoint(map, imageShape.localPoint, altitudeMeters, shape, projectionMatrixArray);
+    const rotationDeg = getImageShapeDisplayRotation(shape, imageShape);
+    const widthPixels = imageShape.widthPixels * imageShape.scale;
+    const heightPixels = imageShape.heightPixels * imageShape.scale;
+    const halfWidth = widthPixels / 2;
+    const halfHeight = heightPixels / 2;
+    const corners = [
+      getRotatedScreenPoint(center, -halfWidth, -halfHeight, rotationDeg),
+      getRotatedScreenPoint(center, halfWidth, -halfHeight, rotationDeg),
+      getRotatedScreenPoint(center, halfWidth, halfHeight, rotationDeg),
+      getRotatedScreenPoint(center, -halfWidth, halfHeight, rotationDeg),
+    ];
+
+    return {
+      id: imageShape.id,
+      label: imageShape.label,
+      imageHref: imageShape.imageHref,
+      center,
+      topCenter: getRotatedScreenPoint(center, 0, -halfHeight, rotationDeg),
+      rotateHandle: getRotatedScreenPoint(center, 0, -halfHeight - IMAGE_ROTATE_HANDLE_OFFSET_PIXELS, rotationDeg),
+      resizeHandle: getRotatedScreenPoint(center, halfWidth, halfHeight, rotationDeg),
+      widthPixels,
+      heightPixels,
+      rotationDeg,
+      altitudeMeters,
+      framePathData: buildPathData(corners),
+    };
+  });
+
+  const extents = getCombinedExtents(bottomRing, topRing);
+  const center = projectLocalPoint(map, { x: 0, y: 0 }, shape.heightMeters * 0.5, shape, projectionMatrixArray);
+  const rotationAnchor = projectLocalPoint(
+    map,
+    { x: (extents.minX + extents.maxX) / 2, y: extents.maxY },
+    shape.heightMeters,
+    shape,
+    projectionMatrixArray,
+  );
+  const rotationHandle = projectLocalPoint(
+    map,
+    { x: (extents.minX + extents.maxX) / 2, y: extents.maxY + ROTATION_HANDLE_OFFSET_METERS },
+    shape.heightMeters,
+    shape,
+    projectionMatrixArray,
+  );
+
+  return {
+    center,
+    rotationAnchor,
+    rotationHandle,
+    bottomPathData: buildPathData(bottomProjectedPathPoints),
+    topPathData: buildPathData(topProjectedPathPoints),
+    routePathData: buildOpenPathData(projectedRoutePoints),
+    routeWaypointPoints: projectedRoutePoints,
+    routeCursor: projectLngLatToScreen(map, { lng: shape.centerLng, lat: shape.centerLat }),
+    bottomHandles,
+    topHandles,
+    imageShapes: projectedImageShapes,
+    verticalConnectors,
+  };
+}
+
 export function App() {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const layerRef = useRef<CustomShapeLayer | null>(null);
+  const projectionMatrixRef = useRef<number[] | null>(null);
   const isMounted = useRef(false);
   const dragStateRef = useRef<DragState | null>(null);
-  // 버그 재현용: 직전 측정 각도(delta 누적 방식 재현). 정상 경로에서는 사용하지 않는다.
-  const prevRotateAngleRef = useRef<number | null>(null);
+  const routeAnimationFrameRef = useRef<number | null>(null);
+  const presetVersionRef = useRef(EDITOR_PRESET_VERSION);
 
-  const footprintRef = useRef<LocalPoint[]>(initialFootprint);
-  const segmentCurvesRef = useRef<SegmentCurveState[]>(initialSegmentCurves);
+  const bottomRingRef = useRef<SectorRing>(cloneRing(initialBottomRing));
+  const topRingRef = useRef<SectorRing>(cloneRing(initialTopRing));
   const outlineStyleRef = useRef<OutlineStyle>('solid');
-  const shapeStateRef = useRef<ShapeState>(initialShapeState);
+  const iconRenderModeRef = useRef<IconRenderMode>('always-front');
+  const shapeStateRef = useRef<ShapeState>({ ...initialShapeState });
 
-  const [footprint, setFootprint] = useState<LocalPoint[]>(initialFootprint);
-  const [segmentCurves, setSegmentCurves] = useState<SegmentCurveState[]>(initialSegmentCurves);
+  const [observerImageHref] = useState(() => createObserverIconDataUrl());
+  const [panelImageHref] = useState(() => createPanelImageHref());
+  const initialImageShapes = createInitialImageShapes(observerImageHref, panelImageHref);
+  const imageShapesRef = useRef<ImageShapeMap>(cloneImageShapeMap(initialImageShapes));
+
+  const [bottomRing, setBottomRing] = useState<SectorRing>(() => cloneRing(initialBottomRing));
+  const [topRing, setTopRing] = useState<SectorRing>(() => cloneRing(initialTopRing));
   const [outlineStyle, setOutlineStyle] = useState<OutlineStyle>('solid');
-  const [shapeState, setShapeState] = useState<ShapeState>(initialShapeState);
+  const [iconRenderMode, setIconRenderMode] = useState<IconRenderMode>('always-front');
+  const [shapeState, setShapeState] = useState<ShapeState>({ ...initialShapeState });
+  const [imageShapes, setImageShapes] = useState<ImageShapeMap>(() => cloneImageShapeMap(initialImageShapes));
+  const [routePlayback, setRoutePlayback] = useState<RoutePlaybackState>({
+    isPlaying: false,
+    progressMeters: 0,
+    loopDurationMs: ROUTE_LOOP_DURATION_MS,
+  });
   const [overlay, setOverlay] = useState<OverlayGeometry | null>(null);
-  const [selectedVertexIndex, setSelectedVertexIndex] = useState<number | null>(null);
   const [activeHandle, setActiveHandle] = useState<string | null>(null);
-  // 버그 재현 모드(다른 프로젝트 동작). 시연용 런타임 토글.
-  const [reproduceBugs, setReproduceBugs] = useState(REPRODUCE_GROUP_PROJECT_BUGS_DEFAULT);
-  const reproduceBugsRef = useRef(REPRODUCE_GROUP_PROJECT_BUGS_DEFAULT);
+  const [selectedImageId, setSelectedImageId] = useState<ImageShapeId | null>('observer');
 
   const syncOverlay = useCallback((
     nextShape = shapeStateRef.current,
-    nextFootprint = footprintRef.current,
-    nextSegmentCurves = segmentCurvesRef.current,
+    nextBottomRing = bottomRingRef.current,
+    nextTopRing = topRingRef.current,
+    nextImageShapes = imageShapesRef.current,
   ) => {
     const map = mapRef.current;
-    if (!map) return;
+    if (!map || !isMounted.current) return;
 
-    setOverlay(buildOverlayGeometry(map, nextFootprint, nextSegmentCurves, nextShape));
+    setOverlay(buildOverlayGeometry(
+      map,
+      nextBottomRing,
+      nextTopRing,
+      nextShape,
+      nextImageShapes,
+      projectionMatrixRef.current,
+    ));
   }, []);
+
+  const syncComparisonCatSymbol = useCallback(
+    (
+      nextShape = shapeStateRef.current,
+      nextBottomRing = bottomRingRef.current,
+      _nextIconRenderMode = iconRenderModeRef.current,
+    ) => {
+      if (!ENABLE_MAP_SYMBOL_ICONS) {
+        return;
+      }
+
+      const map = mapRef.current;
+      if (!map) return;
+
+      if (map.getLayer(COMPARISON_CAT_LAYER_ID)) {
+        map.setLayoutProperty(
+          COMPARISON_CAT_LAYER_ID,
+          'visibility',
+          'visible',
+        );
+      }
+
+      const source = map.getSource(COMPARISON_CAT_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+      if (!source) return;
+
+      const catLngLat = localPointToLngLat(getComparisonCatLocalPoint(nextBottomRing), nextShape);
+
+      source.setData({
+        type: 'FeatureCollection',
+        features: [
+          {
+            type: 'Feature',
+            properties: { role: 'comparison-cat' },
+            geometry: {
+              type: 'Point',
+              coordinates: [catLngLat.lng, catLngLat.lat],
+            },
+          },
+        ],
+      });
+    },
+    [],
+  );
+
+  const syncObserverSymbol = useCallback(
+    (
+      nextShape = shapeStateRef.current,
+      nextBottomRing = bottomRingRef.current,
+      _nextIconRenderMode = iconRenderModeRef.current,
+    ) => {
+      if (!ENABLE_MAP_SYMBOL_ICONS) {
+        return;
+      }
+
+      const map = mapRef.current;
+      if (!map) return;
+
+      if (map.getLayer(OBSERVER_SYMBOL_LAYER_ID)) {
+        map.setLayoutProperty(
+          OBSERVER_SYMBOL_LAYER_ID,
+          'visibility',
+          'visible',
+        );
+      }
+
+      const source = map.getSource(OBSERVER_SYMBOL_SOURCE_ID) as maplibregl.GeoJSONSource | undefined;
+      if (!source) return;
+
+      const iconLngLat = localPointToLngLat(getObserverIconLocalPoint(nextBottomRing), nextShape);
+      source.setData({
+        type: 'FeatureCollection',
+        features: [
+          {
+            type: 'Feature',
+            properties: { role: 'observer-eye' },
+            geometry: {
+              type: 'Point',
+              coordinates: [iconLngLat.lng, iconLngLat.lat],
+            },
+          },
+        ],
+      });
+    },
+    [],
+  );
 
   const rebuildShapeGeometry = useCallback(
     (
-      nextFootprint = footprintRef.current,
-      nextSegmentCurves = segmentCurvesRef.current,
+      nextBottomRing = bottomRingRef.current,
+      nextTopRing = topRingRef.current,
       nextHeightMeters = shapeStateRef.current.heightMeters,
       nextOutlineStyle = outlineStyleRef.current,
+      nextIconRenderMode = iconRenderModeRef.current,
     ) => {
       const layer = layerRef.current;
       if (!layer?.group) return;
@@ -448,14 +1245,27 @@ export function App() {
         layer.edges = undefined;
       }
 
-      if (nextFootprint.length < 3) {
-        mapRef.current?.triggerRepaint();
-        return;
+      if (layer.iconSprite) {
+        layer.group.remove(layer.iconSprite);
+        disposeMaterial(layer.iconSprite.material);
+        layer.iconSprite = undefined;
       }
 
-      // Rebuild the extruded footprint whenever vertices or height change.
-      const geometry = createExtrudedGeometry(nextFootprint, nextSegmentCurves, nextHeightMeters);
-      const topMaterial = new THREE.MeshStandardMaterial({
+      if (layer.comparisonCatSprite) {
+        layer.group.remove(layer.comparisonCatSprite);
+        disposeMaterial(layer.comparisonCatSprite.material);
+        layer.comparisonCatSprite = undefined;
+      }
+
+      if (layer.observerGuide) {
+        layer.group.remove(layer.observerGuide);
+        layer.observerGuide.geometry.dispose();
+        disposeMaterial(layer.observerGuide.material);
+        layer.observerGuide = undefined;
+      }
+
+      const geometry = createSectorGeometry(nextBottomRing, nextTopRing, nextHeightMeters);
+      const capMaterial = new THREE.MeshStandardMaterial({
         color: 0x38bdf8,
         transparent: true,
         opacity: 0.82,
@@ -472,26 +1282,59 @@ export function App() {
         side: THREE.DoubleSide,
       });
 
-      const mesh = new THREE.Mesh(geometry, [topMaterial, sideMaterial]);
+      const mesh = new THREE.Mesh(geometry, [capMaterial, sideMaterial]);
       mesh.frustumCulled = false;
+      mesh.renderOrder = 0;
 
       const edges = new THREE.LineSegments(
         new THREE.EdgesGeometry(geometry),
         createOutlineMaterial(nextOutlineStyle),
       );
       edges.frustumCulled = false;
+      edges.renderOrder = 1;
       if (edges.material instanceof THREE.LineDashedMaterial) {
         edges.computeLineDistances();
       }
 
+      const observerIconPoint = imageShapesRef.current.observer.localPoint;
+      const observerIconPosition = new THREE.Vector3(observerIconPoint.x, observerIconPoint.y, 0);
+      const iconSprite = undefined;
+      const comparisonCatSprite = undefined;
+
+      const observerGuide = createObserverGuide(
+        observerIconPosition,
+        nextBottomRing,
+        nextTopRing,
+        nextHeightMeters,
+        nextIconRenderMode,
+      );
+
       layer.mesh = mesh;
       layer.edges = edges;
+      layer.iconSprite = iconSprite;
+      layer.comparisonCatSprite = comparisonCatSprite;
+      layer.observerGuide = observerGuide;
       layer.group.add(mesh);
       layer.group.add(edges);
 
+      if (observerGuide) {
+        layer.group.add(observerGuide);
+      }
+
+      if (iconSprite) {
+        layer.group.add(iconSprite);
+      }
+
+      if (comparisonCatSprite) {
+        layer.group.add(comparisonCatSprite);
+      }
+
+      syncObserverSymbol(shapeStateRef.current, nextBottomRing, nextIconRenderMode);
+      syncComparisonCatSymbol(shapeStateRef.current, nextBottomRing, nextIconRenderMode);
+
       mapRef.current?.triggerRepaint();
     },
-    [],
+    [syncComparisonCatSymbol, syncObserverSymbol],
   );
 
   const updateShapeState = useCallback(
@@ -499,50 +1342,53 @@ export function App() {
       const nextShape = { ...shapeStateRef.current, ...patch };
       shapeStateRef.current = nextShape;
       setShapeState(nextShape);
-      syncOverlay(nextShape, footprintRef.current);
+      syncOverlay(nextShape, bottomRingRef.current, topRingRef.current, imageShapesRef.current);
+      syncObserverSymbol(nextShape, bottomRingRef.current, iconRenderModeRef.current);
+      syncComparisonCatSymbol(nextShape, bottomRingRef.current);
 
       if (patch.heightMeters !== undefined) {
         rebuildShapeGeometry(
-          footprintRef.current,
-          segmentCurvesRef.current,
+          bottomRingRef.current,
+          topRingRef.current,
           nextShape.heightMeters,
           outlineStyleRef.current,
+          iconRenderModeRef.current,
         );
       }
 
       mapRef.current?.triggerRepaint();
     },
-    [rebuildShapeGeometry, syncOverlay],
+    [rebuildShapeGeometry, syncComparisonCatSymbol, syncObserverSymbol, syncOverlay],
   );
 
-  const updateFootprint = useCallback(
-    (nextFootprint: LocalPoint[], nextSegmentCurves = segmentCurvesRef.current) => {
-      footprintRef.current = nextFootprint;
-      segmentCurvesRef.current = nextSegmentCurves;
-      setFootprint(nextFootprint);
-      setSegmentCurves(nextSegmentCurves);
-      syncOverlay(shapeStateRef.current, nextFootprint, nextSegmentCurves);
+  const updateBottomRing = useCallback(
+    (nextBottomRing: SectorRing) => {
+      bottomRingRef.current = nextBottomRing;
+      setBottomRing(nextBottomRing);
+      syncOverlay(shapeStateRef.current, nextBottomRing, topRingRef.current, imageShapesRef.current);
       rebuildShapeGeometry(
-        nextFootprint,
-        nextSegmentCurves,
+        nextBottomRing,
+        topRingRef.current,
         shapeStateRef.current.heightMeters,
         outlineStyleRef.current,
+        iconRenderModeRef.current,
       );
       mapRef.current?.triggerRepaint();
     },
     [rebuildShapeGeometry, syncOverlay],
   );
 
-  const updateSegmentCurves = useCallback(
-    (nextSegmentCurves: SegmentCurveState[]) => {
-      segmentCurvesRef.current = nextSegmentCurves;
-      setSegmentCurves(nextSegmentCurves);
-      syncOverlay(shapeStateRef.current, footprintRef.current, nextSegmentCurves);
+  const updateTopRing = useCallback(
+    (nextTopRing: SectorRing) => {
+      topRingRef.current = nextTopRing;
+      setTopRing(nextTopRing);
+      syncOverlay(shapeStateRef.current, bottomRingRef.current, nextTopRing, imageShapesRef.current);
       rebuildShapeGeometry(
-        footprintRef.current,
-        nextSegmentCurves,
+        bottomRingRef.current,
+        nextTopRing,
         shapeStateRef.current.heightMeters,
         outlineStyleRef.current,
+        iconRenderModeRef.current,
       );
       mapRef.current?.triggerRepaint();
     },
@@ -554,14 +1400,109 @@ export function App() {
       outlineStyleRef.current = nextOutlineStyle;
       setOutlineStyle(nextOutlineStyle);
       rebuildShapeGeometry(
-        footprintRef.current,
-        segmentCurvesRef.current,
+        bottomRingRef.current,
+        topRingRef.current,
         shapeStateRef.current.heightMeters,
         nextOutlineStyle,
+        iconRenderModeRef.current,
       );
       mapRef.current?.triggerRepaint();
     },
     [rebuildShapeGeometry],
+  );
+
+  const updateIconRenderMode = useCallback(
+    (nextIconRenderMode: IconRenderMode) => {
+      iconRenderModeRef.current = nextIconRenderMode;
+      setIconRenderMode(nextIconRenderMode);
+      syncObserverSymbol(shapeStateRef.current, bottomRingRef.current, nextIconRenderMode);
+      rebuildShapeGeometry(
+        bottomRingRef.current,
+        topRingRef.current,
+        shapeStateRef.current.heightMeters,
+        outlineStyleRef.current,
+        nextIconRenderMode,
+      );
+      mapRef.current?.triggerRepaint();
+    },
+    [rebuildShapeGeometry, syncObserverSymbol],
+  );
+
+  const setRouteProgress = useCallback(
+    (nextProgressMeters: number) => {
+      const nextRouteSample = sampleRouteAtDistance(demoRoutePoints, DEMO_ROUTE_METRICS, nextProgressMeters);
+
+      setRoutePlayback((prev) => ({
+        ...prev,
+        progressMeters: nextProgressMeters,
+      }));
+      updateShapeState({
+        centerLng: nextRouteSample.lng,
+        centerLat: nextRouteSample.lat,
+        rotationZ: nextRouteSample.rotationZ,
+      });
+      const map = mapRef.current;
+      if (map) {
+        map.jumpTo({
+          center: [nextRouteSample.lng, nextRouteSample.lat],
+          zoom: map.getZoom(),
+          pitch: map.getPitch(),
+          bearing: map.getBearing(),
+        });
+      }
+      setSelectedImageId('observer');
+    },
+    [updateShapeState],
+  );
+
+  const toggleRoutePlayback = useCallback(() => {
+    setRoutePlayback((prev) => ({
+      ...prev,
+      isPlaying: !prev.isPlaying,
+    }));
+    setSelectedImageId('observer');
+  }, []);
+
+  const resetRoutePlayback = useCallback(() => {
+    if (routeAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(routeAnimationFrameRef.current);
+      routeAnimationFrameRef.current = null;
+    }
+
+    setRoutePlayback((prev) => ({
+      ...prev,
+      isPlaying: false,
+      progressMeters: 0,
+      loopDurationMs: ROUTE_LOOP_DURATION_MS,
+    }));
+    setRouteProgress(0);
+    mapRef.current?.easeTo({
+      center: INITIAL_CENTER,
+      duration: 700,
+    });
+  }, [setRouteProgress]);
+
+  const updateImageShape = useCallback(
+    (imageId: ImageShapeId, updater: (imageShape: ImageShape) => ImageShape) => {
+      const nextImageShapes = cloneImageShapeMap(imageShapesRef.current);
+      nextImageShapes[imageId] = updater(nextImageShapes[imageId]);
+      imageShapesRef.current = nextImageShapes;
+      setImageShapes(nextImageShapes);
+      syncOverlay(shapeStateRef.current, bottomRingRef.current, topRingRef.current, nextImageShapes);
+
+      if (imageId === 'observer') {
+        rebuildShapeGeometry(
+          bottomRingRef.current,
+          topRingRef.current,
+          shapeStateRef.current.heightMeters,
+          outlineStyleRef.current,
+          iconRenderModeRef.current,
+        );
+      }
+
+      mapRef.current?.triggerRepaint();
+    },
+    [rebuildShapeGeometry, syncOverlay],
   );
 
   const getPointerMercator = useCallback((clientX: number, clientY: number) => {
@@ -578,113 +1519,214 @@ export function App() {
     return { x: mercator.x, y: mercator.y };
   }, []);
 
-  const getPointerLocalMeters = useCallback(
-    (clientX: number, clientY: number) => {
-      const mercator = getPointerMercator(clientX, clientY);
-      if (!mercator) return null;
+  const getPointerScreenPoint = useCallback((clientX: number, clientY: number) => {
+    const container = mapContainerRef.current;
+    if (!container) return null;
+
+    const rect = container.getBoundingClientRect();
+    return {
+      x: clientX - rect.left,
+      y: clientY - rect.top,
+    };
+  }, []);
+
+  const getPointerRotatedLocalAtAltitude = useCallback(
+    (clientX: number, clientY: number, altitudeMeters: number) => {
+      const container = mapContainerRef.current;
+      const projectionMatrixArray = projectionMatrixRef.current;
+
+      if (!container || !projectionMatrixArray || projectionMatrixArray.length !== 16) {
+        const mercator = getPointerMercator(clientX, clientY);
+        if (!mercator) return null;
+
+        const modelData = getTransformModelData(shapeStateRef.current);
+        return {
+          x: (mercator.x - modelData.mercator.x) / modelData.scale,
+          y: -(mercator.y - modelData.mercator.y) / modelData.scale,
+        };
+      }
+
+      const rect = container.getBoundingClientRect();
+      const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
+      const ndcY = 1 - ((clientY - rect.top) / rect.height) * 2;
+      const inverseProjectionMatrix = new THREE.Matrix4().fromArray(projectionMatrixArray).invert();
+      const nearPoint = new THREE.Vector4(ndcX, ndcY, -1, 1).applyMatrix4(inverseProjectionMatrix);
+      const farPoint = new THREE.Vector4(ndcX, ndcY, 1, 1).applyMatrix4(inverseProjectionMatrix);
+
+      if (
+        !Number.isFinite(nearPoint.w)
+        || !Number.isFinite(farPoint.w)
+        || Math.abs(nearPoint.w) < 1e-6
+        || Math.abs(farPoint.w) < 1e-6
+      ) {
+        return null;
+      }
+
+      nearPoint.divideScalar(nearPoint.w);
+      farPoint.divideScalar(farPoint.w);
 
       const modelData = getTransformModelData(shapeStateRef.current);
-      const localPoint = {
-        x: (mercator.x - modelData.mercator.x) / modelData.scale,
-        y: -(mercator.y - modelData.mercator.y) / modelData.scale,
+      const nearLocal = {
+        x: (nearPoint.x - modelData.mercator.x) / modelData.scale,
+        y: -(nearPoint.y - modelData.mercator.y) / modelData.scale,
+        z: (nearPoint.z - modelData.mercator.z) / modelData.scale,
       };
+      const farLocal = {
+        x: (farPoint.x - modelData.mercator.x) / modelData.scale,
+        y: -(farPoint.y - modelData.mercator.y) / modelData.scale,
+        z: (farPoint.z - modelData.mercator.z) / modelData.scale,
+      };
+      const deltaZ = farLocal.z - nearLocal.z;
 
-      return rotatePoint(localPoint, -THREE.MathUtils.degToRad(shapeStateRef.current.rotationZ));
+      if (Math.abs(deltaZ) < 1e-6) {
+        return null;
+      }
+
+      const t = (altitudeMeters - nearLocal.z) / deltaZ;
+      if (!Number.isFinite(t)) {
+        return null;
+      }
+
+      return {
+        x: nearLocal.x + (farLocal.x - nearLocal.x) * t,
+        y: nearLocal.y + (farLocal.y - nearLocal.y) * t,
+      };
     },
     [getPointerMercator],
   );
 
-  const startDrag = useCallback((dragState: DragState, handleId: string, nextSelectedVertexIndex?: number | null) => {
+  const getPointerLocalMetersAtAltitude = useCallback(
+    (clientX: number, clientY: number, altitudeMeters: number) => {
+      const rotatedLocalPoint = getPointerRotatedLocalAtAltitude(clientX, clientY, altitudeMeters);
+      if (!rotatedLocalPoint) return null;
+
+      return rotatePoint(rotatedLocalPoint, -THREE.MathUtils.degToRad(shapeStateRef.current.rotationZ));
+    },
+    [getPointerRotatedLocalAtAltitude],
+  );
+
+  const startDrag = useCallback((dragState: DragState, handleId: string) => {
+    setRoutePlayback((prev) => (
+      prev.isPlaying
+        ? { ...prev, isPlaying: false }
+        : prev
+    ));
     dragStateRef.current = dragState;
     setActiveHandle(handleId);
-
-    if (nextSelectedVertexIndex !== undefined) {
-      setSelectedVertexIndex(nextSelectedVertexIndex);
-    }
-
     mapRef.current?.dragPan.disable();
   }, []);
 
-  const insertVertexAfter = useCallback(
-    (insertAfter: number) => {
-      const points = footprintRef.current;
-      const curves = segmentCurvesRef.current;
-      const nextIndex = insertAfter + 1;
-      const currentPoint = points[insertAfter];
-      const nextPoint = points[(insertAfter + 1) % points.length];
-      const curveOffset = curves[insertAfter]?.curveOffset ?? 0;
-      const controlPoint = getCurveControlPoint(currentPoint, nextPoint, curveOffset);
-      const firstHalfControlPoint = getSegmentMidpoint(currentPoint, controlPoint);
-      const secondHalfControlPoint = getSegmentMidpoint(controlPoint, nextPoint);
-      const insertedPoint = getSegmentMidpoint(firstHalfControlPoint, secondHalfControlPoint);
-      const nextFootprint = [
-        ...points.slice(0, nextIndex),
-        insertedPoint,
-        ...points.slice(nextIndex),
-      ];
-      const nextSegmentCurves = [
-        ...curves.slice(0, insertAfter),
-        {
-          curveOffset: getCurveOffsetFromControlPoint(currentPoint, insertedPoint, firstHalfControlPoint),
-        },
-        {
-          curveOffset: getCurveOffsetFromControlPoint(insertedPoint, nextPoint, secondHalfControlPoint),
-        },
-        ...curves.slice(insertAfter + 1),
-      ];
+  const resetTopRing = useCallback(() => {
+    const nextTopRing = cloneRing(initialTopRing);
+    topRingRef.current = nextTopRing;
+    setTopRing(nextTopRing);
+    syncOverlay(shapeStateRef.current, bottomRingRef.current, nextTopRing, imageShapesRef.current);
+    rebuildShapeGeometry(
+      bottomRingRef.current,
+      nextTopRing,
+      shapeStateRef.current.heightMeters,
+      outlineStyleRef.current,
+      iconRenderModeRef.current,
+    );
+  }, [rebuildShapeGeometry, syncOverlay]);
 
-      updateFootprint(nextFootprint, nextSegmentCurves);
-      setSelectedVertexIndex(nextIndex);
-    },
-    [updateFootprint],
-  );
-
-  const deleteSelectedVertex = useCallback(() => {
-    if (selectedVertexIndex === null || footprintRef.current.length <= 3) return;
-
-    const previousSegmentIndex = (
-      selectedVertexIndex - 1 + segmentCurvesRef.current.length
-    ) % segmentCurvesRef.current.length;
-    const nextFootprint = footprintRef.current.filter((_, index) => index !== selectedVertexIndex);
-    const nextSegmentCurves = segmentCurvesRef.current.flatMap((segmentCurve, index) => {
-      if (index === selectedVertexIndex) return [];
-      if (index === previousSegmentIndex) return [{ curveOffset: 0 }];
-      return [segmentCurve];
-    });
-    updateFootprint(nextFootprint, nextSegmentCurves);
-    setSelectedVertexIndex((current) => {
-      if (current === null) return null;
-      return Math.min(current, nextFootprint.length - 1);
-    });
-  }, [selectedVertexIndex, updateFootprint]);
+  const resetImageShapes = useCallback(() => {
+    const nextImageShapes = cloneImageShapeMap(initialImageShapes);
+    imageShapesRef.current = nextImageShapes;
+    setImageShapes(nextImageShapes);
+    setSelectedImageId('observer');
+    syncOverlay(shapeStateRef.current, bottomRingRef.current, topRingRef.current, nextImageShapes);
+    rebuildShapeGeometry(
+      bottomRingRef.current,
+      topRingRef.current,
+      shapeStateRef.current.heightMeters,
+      outlineStyleRef.current,
+      iconRenderModeRef.current,
+    );
+  }, [initialImageShapes, rebuildShapeGeometry, syncOverlay]);
 
   const resetEditor = useCallback(() => {
-    const nextSegmentCurves = createInitialSegmentCurves(initialFootprint.length);
-    footprintRef.current = initialFootprint;
-    segmentCurvesRef.current = nextSegmentCurves;
-    shapeStateRef.current = initialShapeState;
-    setFootprint(initialFootprint);
-    setSegmentCurves(nextSegmentCurves);
-    setShapeState(initialShapeState);
-    setSelectedVertexIndex(null);
-    setActiveHandle(null);
+    const nextBottomRing = cloneRing(initialBottomRing);
+    const nextTopRing = cloneRing(initialTopRing);
+    const nextShapeState = { ...initialShapeState };
+    const nextImageShapes = cloneImageShapeMap(initialImageShapes);
 
-    syncOverlay(initialShapeState, initialFootprint, nextSegmentCurves);
+    bottomRingRef.current = nextBottomRing;
+    topRingRef.current = nextTopRing;
+    shapeStateRef.current = nextShapeState;
+    imageShapesRef.current = nextImageShapes;
+    setBottomRing(nextBottomRing);
+    setTopRing(nextTopRing);
+    setShapeState(nextShapeState);
+    setImageShapes(nextImageShapes);
+    setActiveHandle(null);
+    setSelectedImageId('observer');
+    setRoutePlayback((prev) => ({
+      ...prev,
+      isPlaying: false,
+      progressMeters: 0,
+      loopDurationMs: ROUTE_LOOP_DURATION_MS,
+    }));
+
+    syncOverlay(nextShapeState, nextBottomRing, nextTopRing, nextImageShapes);
     rebuildShapeGeometry(
-      initialFootprint,
-      nextSegmentCurves,
-      initialShapeState.heightMeters,
+      nextBottomRing,
+      nextTopRing,
+      nextShapeState.heightMeters,
       outlineStyleRef.current,
+      iconRenderModeRef.current,
     );
 
     mapRef.current?.easeTo({
       center: INITIAL_CENTER,
-      zoom: 6,
-      pitch: 68,
-      bearing: 24,
+      zoom: DEFAULT_VIEW_ZOOM,
+      pitch: DEFAULT_VIEW_PITCH,
+      bearing: 0,
       duration: 600,
     });
-  }, [rebuildShapeGeometry, syncOverlay]);
+  }, [initialImageShapes, rebuildShapeGeometry, syncOverlay]);
+
+  useEffect(() => {
+    if (presetVersionRef.current === EDITOR_PRESET_VERSION) {
+      return;
+    }
+
+    presetVersionRef.current = EDITOR_PRESET_VERSION;
+    resetEditor();
+  }, [resetEditor]);
+
+  useEffect(() => {
+    if (!routePlayback.isPlaying || DEMO_ROUTE_METRICS.totalLengthMeters <= 0) {
+      if (routeAnimationFrameRef.current !== null) {
+        window.cancelAnimationFrame(routeAnimationFrameRef.current);
+        routeAnimationFrameRef.current = null;
+      }
+      return undefined;
+    }
+
+    const startedAt = performance.now();
+    const startProgressMeters = routePlayback.progressMeters;
+
+    const animateRoute = (timestamp: number) => {
+      const elapsed = timestamp - startedAt;
+      const nextProgressMeters = (
+        startProgressMeters
+        + (elapsed / routePlayback.loopDurationMs) * DEMO_ROUTE_METRICS.totalLengthMeters
+      ) % DEMO_ROUTE_METRICS.totalLengthMeters;
+
+      setRouteProgress(nextProgressMeters);
+      routeAnimationFrameRef.current = window.requestAnimationFrame(animateRoute);
+    };
+
+    routeAnimationFrameRef.current = window.requestAnimationFrame(animateRoute);
+
+    return () => {
+      if (routeAnimationFrameRef.current !== null) {
+        window.cancelAnimationFrame(routeAnimationFrameRef.current);
+        routeAnimationFrameRef.current = null;
+      }
+    };
+  }, [routePlayback.isPlaying, routePlayback.loopDurationMs, setRouteProgress]);
 
   useEffect(() => {
     const handlePointerMove = (event: PointerEvent) => {
@@ -699,6 +1741,7 @@ export function App() {
           x: dragState.startCenterMercator.x + (currentPointerMercator.x - dragState.startPointerMercator.x),
           y: dragState.startCenterMercator.y + (currentPointerMercator.y - dragState.startPointerMercator.y),
         };
+
         const nextCenterLngLat = new maplibregl.MercatorCoordinate(
           nextCenterMercator.x,
           nextCenterMercator.y,
@@ -712,73 +1755,128 @@ export function App() {
         return;
       }
 
-      const localPointer = getPointerLocalMeters(event.clientX, event.clientY);
-      if (!localPointer) return;
-
       if (dragState.type === 'rotate') {
-        const rawAngleDeg = THREE.MathUtils.radToDeg(Math.atan2(localPointer.y, localPointer.x)) - 90;
+        const modelPointer = getPointerRotatedLocalAtAltitude(
+          event.clientX,
+          event.clientY,
+          shapeStateRef.current.heightMeters,
+        );
+        if (!modelPointer) return;
 
-        if (reproduceBugsRef.current) {
-          // ===== 수정 전 동작 재현 (의도적 버그) =====
-          // ① 커밋 경로의 불필요한 부호 반전 — 그쪽 transformGroupRotateAngle의 이중 반전에 대응.
-          //    (guide는 이미 올바른 연속값을 넘기는데 커밋에서 한 번 더 뒤집던 부분. 실제 수정에서 삭제됨)
-          const measured = -rawAngleDeg;
+        const rotationZ = normalizeDegrees(getRotationFromModelPoint(modelPointer) + dragState.rotationOffsetDeg);
+        updateShapeState({ rotationZ });
+        return;
+      }
 
-          // ② 로컬 회전 delta 누적 + 단순 %360 정규화:
-          //    절대각 set이 아니라 이전 프레임 대비 delta를 더하고, 이중 모듈로가 아닌 단순 %360을 쓴다.
-          //    → atan2 ±180° 분기점을 넘을 때 delta가 튀어 "일정 이상 돌리면 반대로" 현상이 남는다.
-          if (prevRotateAngleRef.current === null) {
-            prevRotateAngleRef.current = measured;
-            return;
+      if (dragState.type === 'image-move') {
+        if (dragState.imageId === 'observer' && dragState.startPointerMercator && dragState.startCenterMercator) {
+          const currentPointerMercator = getPointerMercator(event.clientX, event.clientY);
+          if (!currentPointerMercator) return;
+
+          const nextCenterMercator = {
+            x: dragState.startCenterMercator.x + (currentPointerMercator.x - dragState.startPointerMercator.x),
+            y: dragState.startCenterMercator.y + (currentPointerMercator.y - dragState.startPointerMercator.y),
+          };
+
+          const nextCenterLngLat = new maplibregl.MercatorCoordinate(
+            nextCenterMercator.x,
+            nextCenterMercator.y,
+            0,
+          ).toLngLat();
+
+          const nextShapePatch: Partial<ShapeState> = {
+            centerLng: nextCenterLngLat.lng,
+            centerLat: nextCenterLngLat.lat,
+          };
+
+          if (dragState.previousPointerMercator) {
+            const modelData = getTransformModelData(shapeStateRef.current);
+            const deltaX = (currentPointerMercator.x - dragState.previousPointerMercator.x) / modelData.scale;
+            const deltaY = -(currentPointerMercator.y - dragState.previousPointerMercator.y) / modelData.scale;
+
+            if (Math.hypot(deltaX, deltaY) > 120) {
+              nextShapePatch.rotationZ = getRotationFromModelPoint({ x: deltaX, y: deltaY });
+            }
           }
-          const delta = measured - prevRotateAngleRef.current;
-          prevRotateAngleRef.current = measured;
-          const accumulated = (shapeStateRef.current.rotationZ + delta) % 360; // 단순 %360 (음수 미보정)
-          updateShapeState({ rotationZ: accumulated });
+
+          updateShapeState(nextShapePatch);
+          dragStateRef.current = {
+            ...dragState,
+            previousPointerMercator: currentPointerMercator,
+          };
           return;
         }
 
-        // ===== 정상 경로 (= 그쪽 프로젝트에 적용된 수정과 동일한 형태) =====
-        // 로컬 Y-up 단일 프레임에서 측정 → 연속 절대각을 그대로 set → 이중 모듈로 정규화.
-        // 커밋 경로의 부호 반전 없음(transformGroupRotateAngle override 삭제에 대응), delta 누적 없음.
-        updateShapeState({ rotationZ: normalizeDegrees(rawAngleDeg) });
-        return;
-      }
-
-      if (dragState.type === 'curve') {
-        const points = footprintRef.current;
-        const currentPoint = points[dragState.index];
-        const nextPoint = points[(dragState.index + 1) % points.length];
-        const midpoint = getSegmentMidpoint(currentPoint, nextPoint);
-        const normal = getSegmentNormal(currentPoint, nextPoint);
-        const offsetAlongNormal = (localPointer.x - midpoint.x) * normal.x
-          + (localPointer.y - midpoint.y) * normal.y;
-        const nextCurveOffset = clamp(
-          offsetAlongNormal,
-          -getCurveOffsetLimit(currentPoint, nextPoint),
-          getCurveOffsetLimit(currentPoint, nextPoint),
+        const localPointer = getPointerLocalMetersAtAltitude(
+          event.clientX,
+          event.clientY,
+          dragState.altitudeMode === 'top' ? shapeStateRef.current.heightMeters : 0,
         );
-        const nextSegmentCurves = segmentCurvesRef.current.map((segmentCurve, index) => (
-          index === dragState.index
-            ? { curveOffset: nextCurveOffset }
-            : segmentCurve
-        ));
+        if (!localPointer) return;
 
-        updateSegmentCurves(nextSegmentCurves);
+        updateImageShape(dragState.imageId, (imageShape) => ({
+          ...imageShape,
+          localPoint: {
+            x: localPointer.x + dragState.pointerOffset.x,
+            y: localPointer.y + dragState.pointerOffset.y,
+          },
+        }));
         return;
       }
 
-      const nextFootprint = footprintRef.current.map((point, index) => (
-        index === dragState.index ? localPointer : point
-      ));
-      updateFootprint(nextFootprint);
+      if (dragState.type === 'image-rotate') {
+        const pointerScreenPoint = getPointerScreenPoint(event.clientX, event.clientY);
+        if (!pointerScreenPoint) return;
+
+        const pointerAngle = getAngleBetweenPointsDeg(dragState.center, pointerScreenPoint);
+        updateImageShape(dragState.imageId, (imageShape) => ({
+          ...imageShape,
+          rotationDeg: normalizeDegrees(pointerAngle + dragState.rotationOffsetDeg - shapeStateRef.current.rotationZ),
+        }));
+        return;
+      }
+
+      if (dragState.type === 'image-scale') {
+        const pointerScreenPoint = getPointerScreenPoint(event.clientX, event.clientY);
+        if (!pointerScreenPoint) return;
+
+        const nextDistance = getDistanceBetweenPoints(dragState.center, pointerScreenPoint);
+        if (!Number.isFinite(nextDistance) || nextDistance <= 1e-6) return;
+
+        updateImageShape(dragState.imageId, (imageShape) => ({
+          ...imageShape,
+          scale: clamp(
+            dragState.startScale * (nextDistance / dragState.startDistance),
+            IMAGE_MIN_SCALE,
+            IMAGE_MAX_SCALE,
+          ),
+        }));
+        return;
+      }
+
+      const localPointer = getPointerLocalMetersAtAltitude(
+        event.clientX,
+        event.clientY,
+        dragState.ring === 'top' ? shapeStateRef.current.heightMeters : 0,
+      );
+      if (!localPointer) return;
+
+      if (dragState.ring === 'bottom') {
+        const nextRing = cloneRing(bottomRingRef.current);
+        nextRing[dragState.key] = localPointer;
+        updateBottomRing(sanitizeSectorRing(nextRing));
+        return;
+      }
+
+      const nextRing = cloneRing(topRingRef.current);
+      nextRing[dragState.key] = localPointer;
+      updateTopRing(sanitizeSectorRing(nextRing));
     };
 
     const handlePointerUp = () => {
       if (!dragStateRef.current) return;
 
       dragStateRef.current = null;
-      prevRotateAngleRef.current = null;
       setActiveHandle(null);
       mapRef.current?.dragPan.enable();
     };
@@ -790,30 +1888,7 @@ export function App() {
       window.removeEventListener('pointermove', handlePointerMove);
       window.removeEventListener('pointerup', handlePointerUp);
     };
-  }, [getPointerLocalMeters, getPointerMercator, updateFootprint, updateSegmentCurves, updateShapeState]);
-
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Delete' && event.key !== 'Backspace') return;
-
-      const activeElement = document.activeElement;
-      if (
-        activeElement instanceof HTMLInputElement
-        || activeElement instanceof HTMLTextAreaElement
-        || activeElement instanceof HTMLSelectElement
-      ) {
-        return;
-      }
-
-      if (selectedVertexIndex === null) return;
-
-      event.preventDefault();
-      deleteSelectedVertex();
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [deleteSelectedVertex, selectedVertexIndex]);
+  }, [getPointerLocalMetersAtAltitude, getPointerMercator, getPointerRotatedLocalAtAltitude, getPointerScreenPoint, updateBottomRing, updateImageShape, updateShapeState, updateTopRing]);
 
   useEffect(() => {
     if (isMounted.current || !mapContainerRef.current) return;
@@ -823,9 +1898,9 @@ export function App() {
       container: mapContainerRef.current,
       style: STYLE_URL,
       center: INITIAL_CENTER,
-      zoom: 6,
-      pitch: 68,
-      bearing: 24,
+      zoom: DEFAULT_VIEW_ZOOM,
+      pitch: DEFAULT_VIEW_PITCH,
+      bearing: 0,
       antialias: true,
     });
 
@@ -842,6 +1917,8 @@ export function App() {
         this.scene = new THREE.Scene();
         this.camera = new THREE.Camera();
         this.group = new THREE.Group();
+        this.iconTexture = createObserverIconTexture();
+        this.comparisonCatTexture = undefined;
 
         const ambientLight = new THREE.AmbientLight(0xffffff, 0.86);
         const directionalLight = new THREE.DirectionalLight(0xffffff, 1.15);
@@ -865,6 +1942,8 @@ export function App() {
       render(_gl, matrix) {
         if (!this.camera || !this.scene || !this.renderer || !this.group) return;
 
+        projectionMatrixRef.current = Array.from(matrix);
+
         const currentShape = shapeStateRef.current;
         const modelData = getTransformModelData(currentShape);
 
@@ -878,9 +1957,28 @@ export function App() {
           .fromArray(matrix)
           .multiply(layerMatrix);
 
+        this.group.updateMatrixWorld(true);
+
+        if (this.iconSprite) {
+          syncIconSpriteScale(
+            this.iconSprite,
+            this.group,
+            this.camera,
+            map.getCanvas(),
+          );
+        }
+
+        if (this.comparisonCatSprite) {
+          syncIconSpriteScale(
+            this.comparisonCatSprite,
+            this.group,
+            this.camera,
+            map.getCanvas(),
+          );
+        }
+
         this.renderer.resetState();
         this.renderer.render(this.scene, this.camera);
-
         map.triggerRepaint();
       },
 
@@ -897,6 +1995,27 @@ export function App() {
           this.edges = undefined;
         }
 
+        if (this.iconSprite) {
+          disposeMaterial(this.iconSprite.material);
+          this.iconSprite = undefined;
+        }
+
+        if (this.comparisonCatSprite) {
+          disposeMaterial(this.comparisonCatSprite.material);
+          this.comparisonCatSprite = undefined;
+        }
+
+        if (this.observerGuide) {
+          this.observerGuide.geometry.dispose();
+          disposeMaterial(this.observerGuide.material);
+          this.observerGuide = undefined;
+        }
+
+        this.iconTexture?.dispose();
+        this.iconTexture = undefined;
+  this.comparisonCatTexture?.dispose();
+  this.comparisonCatTexture = undefined;
+
         this.group?.clear();
         this.renderer?.dispose();
 
@@ -906,41 +2025,168 @@ export function App() {
       },
     };
 
-    const syncFromMap = () => syncOverlay();
-    const clearSelection = () => {
-      if (dragStateRef.current) return;
-      setSelectedVertexIndex(null);
+    const scheduleOverlaySync = () => {
+      window.requestAnimationFrame(() => {
+        if (!isMounted.current) return;
+        syncOverlay();
+      });
+    };
+
+    const ensureComparisonCatLayer = async () => {
+      if (!ENABLE_MAP_SYMBOL_ICONS) {
+        return;
+      }
+
+      try {
+        if (!map.hasImage(COMPARISON_CAT_IMAGE_ID)) {
+          const image = await map.loadImage(COMPARISON_CAT_IMAGE_URL);
+          if (!map.hasImage(COMPARISON_CAT_IMAGE_ID)) {
+            map.addImage(COMPARISON_CAT_IMAGE_ID, image.data);
+          }
+
+          const comparisonCatTexture = createSpriteTextureFromImage(image.data);
+          if (layerRef.current && comparisonCatTexture) {
+            layerRef.current.comparisonCatTexture?.dispose();
+            layerRef.current.comparisonCatTexture = comparisonCatTexture;
+            rebuildShapeGeometry();
+          }
+        }
+
+        if (!map.getSource(COMPARISON_CAT_SOURCE_ID)) {
+          map.addSource(COMPARISON_CAT_SOURCE_ID, {
+            type: 'geojson',
+            data: {
+              type: 'FeatureCollection',
+              features: [],
+            },
+          });
+        }
+
+        if (!map.getLayer(COMPARISON_CAT_LAYER_ID)) {
+          map.addLayer({
+            id: COMPARISON_CAT_LAYER_ID,
+            type: 'symbol',
+            source: COMPARISON_CAT_SOURCE_ID,
+            layout: {
+              'icon-image': COMPARISON_CAT_IMAGE_ID,
+              ...SHARED_ICON_SYMBOL_LAYOUT,
+            },
+          });
+        }
+
+        syncComparisonCatSymbol(shapeStateRef.current, bottomRingRef.current, iconRenderModeRef.current);
+      } catch (error) {
+        console.error('Failed to load comparison cat symbol', error);
+      }
+    };
+
+    const ensureObserverSymbolLayer = () => {
+      if (!ENABLE_MAP_SYMBOL_ICONS) {
+        return;
+      }
+
+      try {
+        if (!map.hasImage(OBSERVER_SYMBOL_IMAGE_ID)) {
+          map.addImage(OBSERVER_SYMBOL_IMAGE_ID, createObserverIconImageData());
+        }
+
+        if (!map.getSource(OBSERVER_SYMBOL_SOURCE_ID)) {
+          map.addSource(OBSERVER_SYMBOL_SOURCE_ID, {
+            type: 'geojson',
+            data: {
+              type: 'FeatureCollection',
+              features: [],
+            },
+          });
+        }
+
+        if (!map.getLayer(OBSERVER_SYMBOL_LAYER_ID)) {
+          map.addLayer({
+            id: OBSERVER_SYMBOL_LAYER_ID,
+            type: 'symbol',
+            source: OBSERVER_SYMBOL_SOURCE_ID,
+            layout: {
+              'icon-image': OBSERVER_SYMBOL_IMAGE_ID,
+              ...SHARED_ICON_SYMBOL_LAYOUT,
+            },
+          });
+        }
+
+        syncObserverSymbol(shapeStateRef.current, bottomRingRef.current, iconRenderModeRef.current);
+      } catch (error) {
+        console.error('Failed to load observer symbol', error);
+      }
     };
 
     map.on('load', () => {
       if (!map.getLayer(CUSTOM_LAYER_ID)) {
         map.addLayer(customLayer);
       }
-      syncOverlay();
+
+      ensureObserverSymbolLayer();
+      void ensureComparisonCatLayer();
+
+      map.once('render', scheduleOverlaySync);
     });
-    map.on('move', syncFromMap);
-    map.on('resize', syncFromMap);
-    map.on('click', clearSelection);
+
+    map.on('move', scheduleOverlaySync);
+    map.on('resize', scheduleOverlaySync);
 
     return () => {
-      map.off('move', syncFromMap);
-      map.off('resize', syncFromMap);
-      map.off('click', clearSelection);
+      map.off('move', scheduleOverlaySync);
+      map.off('resize', scheduleOverlaySync);
 
       if (map.getLayer(CUSTOM_LAYER_ID)) {
         map.removeLayer(CUSTOM_LAYER_ID);
       }
 
+      if (map.getLayer(COMPARISON_CAT_LAYER_ID)) {
+        map.removeLayer(COMPARISON_CAT_LAYER_ID);
+      }
+
+      if (map.getLayer(OBSERVER_SYMBOL_LAYER_ID)) {
+        map.removeLayer(OBSERVER_SYMBOL_LAYER_ID);
+      }
+
+      if (map.getSource(COMPARISON_CAT_SOURCE_ID)) {
+        map.removeSource(COMPARISON_CAT_SOURCE_ID);
+      }
+
+      if (map.getSource(OBSERVER_SYMBOL_SOURCE_ID)) {
+        map.removeSource(OBSERVER_SYMBOL_SOURCE_ID);
+      }
+
+      if (map.hasImage(COMPARISON_CAT_IMAGE_ID)) {
+        map.removeImage(COMPARISON_CAT_IMAGE_ID);
+      }
+
+      if (map.hasImage(OBSERVER_SYMBOL_IMAGE_ID)) {
+        map.removeImage(OBSERVER_SYMBOL_IMAGE_ID);
+      }
+
       map.remove();
       mapRef.current = null;
+      projectionMatrixRef.current = null;
       isMounted.current = false;
     };
-  }, [rebuildShapeGeometry, syncOverlay]);
+  }, [rebuildShapeGeometry, syncComparisonCatSymbol, syncOverlay]);
 
-  const selectedVertex = selectedVertexIndex === null ? null : footprint[selectedVertexIndex];
   const overlayStroke = 'rgba(14, 165, 233, 0.96)';
   const overlayStrokeDasharray = getOutlineSvgDasharray(outlineStyle);
   const overlayFill = 'rgba(56, 189, 248, 0.12)';
+  const topHandleFill = '#f97316';
+  const selectedImage = selectedImageId ? imageShapes[selectedImageId] : null;
+  const routeProgressPercent = DEMO_ROUTE_METRICS.totalLengthMeters <= 0
+    ? 0
+    : (routePlayback.progressMeters / DEMO_ROUTE_METRICS.totalLengthMeters) * 100;
+  const bottomRangeMeters = Math.round(Math.hypot(
+    bottomRing.center.x - bottomRing.apex.x,
+    bottomRing.center.y - bottomRing.apex.y,
+  ));
+  const topRangeMeters = Math.round(Math.hypot(
+    topRing.center.x - topRing.apex.x,
+    topRing.center.y - topRing.apex.y,
+  ));
 
   return (
     <div className="app-shell">
@@ -953,7 +2199,39 @@ export function App() {
           style={{ position: 'absolute', inset: 0, zIndex: 9, overflow: 'visible', pointerEvents: 'none' }}
         >
           <path
-            d={overlay.pathData}
+            d={overlay.routePathData}
+            fill="none"
+            stroke="rgba(37, 99, 235, 0.52)"
+            strokeWidth={3}
+            strokeDasharray="12 8"
+            vectorEffect="non-scaling-stroke"
+          />
+
+          {overlay.routeWaypointPoints.map((point, index) => (
+            <circle
+              key={`route-waypoint-${index}`}
+              cx={point.x}
+              cy={point.y}
+              r={index === 0 ? 6 : 4.5}
+              fill={index === 0 ? '#2563eb' : '#ffffff'}
+              stroke="#1e3a8a"
+              strokeWidth={2}
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+
+          <circle
+            cx={overlay.routeCursor.x}
+            cy={overlay.routeCursor.y}
+            r={8}
+            fill={routePlayback.isPlaying ? '#16a34a' : '#0f172a'}
+            stroke="#ffffff"
+            strokeWidth={2.5}
+            vectorEffect="non-scaling-stroke"
+          />
+
+          <path
+            d={overlay.bottomPathData}
             fill={overlayFill}
             stroke={overlayStroke}
             strokeDasharray={overlayStrokeDasharray}
@@ -966,6 +2244,7 @@ export function App() {
             onPointerDown={(event) => {
               event.preventDefault();
               event.stopPropagation();
+              setSelectedImageId(null);
 
               const startPointerMercator = getPointerMercator(event.clientX, event.clientY);
               const modelData = getTransformModelData(shapeStateRef.current);
@@ -978,15 +2257,215 @@ export function App() {
                   startCenterMercator: { x: modelData.mercator.x, y: modelData.mercator.y },
                 },
                 'move-shape',
-                null,
               );
             }}
-            onClick={(event) => {
-              event.preventDefault();
-              event.stopPropagation();
-              setSelectedVertexIndex(null);
-            }}
           />
+
+          {overlay.verticalConnectors.map((connector, index) => (
+            <line
+              key={`connector-${ringHandleKeys[index]}`}
+              x1={connector.from.x}
+              y1={connector.from.y}
+              x2={connector.to.x}
+              y2={connector.to.y}
+              stroke="rgba(15, 23, 42, 0.35)"
+              strokeWidth={1.4}
+              strokeDasharray="4 5"
+              vectorEffect="non-scaling-stroke"
+            />
+          ))}
+
+          <path
+            d={overlay.topPathData}
+            fill="rgba(249, 115, 22, 0.08)"
+            stroke="rgba(249, 115, 22, 0.95)"
+            strokeWidth={2.2}
+            strokeDasharray="7 5"
+            vectorEffect="non-scaling-stroke"
+          />
+
+          {overlay.imageShapes.map((imageShape) => {
+            const imageModel = imageShapes[imageShape.id];
+            const isSelected = selectedImageId === imageShape.id;
+
+            return (
+              <g key={imageShape.id}>
+                {isSelected ? (
+                  <>
+                    <path
+                      d={imageShape.framePathData}
+                      fill="rgba(255,255,255,0.06)"
+                      stroke="rgba(15, 23, 42, 0.92)"
+                      strokeWidth={2}
+                      strokeDasharray="6 5"
+                      vectorEffect="non-scaling-stroke"
+                    />
+                    <line
+                      x1={imageShape.topCenter.x}
+                      y1={imageShape.topCenter.y}
+                      x2={imageShape.rotateHandle.x}
+                      y2={imageShape.rotateHandle.y}
+                      stroke="rgba(15, 23, 42, 0.9)"
+                      strokeWidth={1.8}
+                      vectorEffect="non-scaling-stroke"
+                    />
+                  </>
+                ) : null}
+
+                <image
+                  href={imageShape.imageHref}
+                  x={imageShape.center.x - imageShape.widthPixels / 2}
+                  y={imageShape.center.y - imageShape.heightPixels / 2}
+                  width={imageShape.widthPixels}
+                  height={imageShape.heightPixels}
+                  opacity={imageShape.id === 'panel' ? 0.96 : 1}
+                  preserveAspectRatio="none"
+                  transform={`rotate(${imageShape.rotationDeg} ${imageShape.center.x} ${imageShape.center.y})`}
+                  style={{
+                    pointerEvents: 'auto',
+                    cursor: activeHandle === `image-${imageShape.id}-move` ? 'grabbing' : 'grab',
+                    filter: isSelected ? 'drop-shadow(0 12px 18px rgba(15,23,42,0.22))' : 'drop-shadow(0 8px 14px rgba(15,23,42,0.16))',
+                  }}
+                  onPointerDown={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    const altitudeMeters = getImageShapeAltitude(imageModel, shapeStateRef.current);
+                    const localPointer = getPointerLocalMetersAtAltitude(event.clientX, event.clientY, altitudeMeters);
+                    if (!localPointer) return;
+
+                    const currentShapeModel = getTransformModelData(shapeStateRef.current);
+                    const startPointerMercator = imageShape.id === 'observer'
+                      ? getPointerMercator(event.clientX, event.clientY)
+                      : undefined;
+
+                    setSelectedImageId(imageShape.id);
+                    startDrag(
+                      {
+                        type: 'image-move',
+                        imageId: imageShape.id,
+                        altitudeMode: imageModel.altitudeMode,
+                        pointerOffset: {
+                          x: imageModel.localPoint.x - localPointer.x,
+                          y: imageModel.localPoint.y - localPointer.y,
+                        },
+                        startPointerMercator,
+                        startCenterMercator: imageShape.id === 'observer'
+                          ? { x: currentShapeModel.mercator.x, y: currentShapeModel.mercator.y }
+                          : undefined,
+                        previousPointerMercator: startPointerMercator,
+                      },
+                      `image-${imageShape.id}-move`,
+                    );
+                  }}
+                />
+
+                {isSelected ? (
+                  <>
+                    <circle
+                      cx={imageShape.rotateHandle.x}
+                      cy={imageShape.rotateHandle.y}
+                      r={HANDLE_RADIUS}
+                      fill={activeHandle === `image-${imageShape.id}-rotate` ? '#0f172a' : '#ffffff'}
+                      stroke="#0f172a"
+                      strokeWidth={3}
+                      vectorEffect="non-scaling-stroke"
+                      style={{ pointerEvents: 'auto', cursor: 'grab' }}
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const pointerScreenPoint = getPointerScreenPoint(event.clientX, event.clientY);
+                        if (!pointerScreenPoint) return;
+
+                        setSelectedImageId(imageShape.id);
+                        startDrag(
+                          {
+                            type: 'image-rotate',
+                            imageId: imageShape.id,
+                            center: imageShape.center,
+                            rotationOffsetDeg: normalizeDegrees(
+                              imageShape.rotationDeg - getAngleBetweenPointsDeg(imageShape.center, pointerScreenPoint),
+                            ),
+                          },
+                          `image-${imageShape.id}-rotate`,
+                        );
+                      }}
+                    />
+
+                    <circle
+                      cx={imageShape.resizeHandle.x}
+                      cy={imageShape.resizeHandle.y}
+                      r={IMAGE_RESIZE_HANDLE_RADIUS}
+                      fill={activeHandle === `image-${imageShape.id}-scale` ? '#0f172a' : '#38bdf8'}
+                      stroke="#ffffff"
+                      strokeWidth={2.5}
+                      vectorEffect="non-scaling-stroke"
+                      style={{ pointerEvents: 'auto', cursor: 'nwse-resize' }}
+                      onPointerDown={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        const pointerScreenPoint = getPointerScreenPoint(event.clientX, event.clientY);
+                        if (!pointerScreenPoint) return;
+
+                        setSelectedImageId(imageShape.id);
+                        startDrag(
+                          {
+                            type: 'image-scale',
+                            imageId: imageShape.id,
+                            center: imageShape.center,
+                            startDistance: Math.max(
+                              getDistanceBetweenPoints(imageShape.center, pointerScreenPoint),
+                              1,
+                            ),
+                            startScale: imageModel.scale,
+                          },
+                          `image-${imageShape.id}-scale`,
+                        );
+                      }}
+                    />
+                  </>
+                ) : null}
+              </g>
+            );
+          })}
+
+          {overlay.bottomHandles.map((handle) => (
+            <circle
+              key={handle.label}
+              cx={handle.x}
+              cy={handle.y}
+              r={HANDLE_RADIUS}
+              fill={activeHandle === handle.label ? '#0f172a' : '#ffffff'}
+              stroke={activeHandle === handle.label ? '#38bdf8' : '#0369a1'}
+              strokeWidth={3}
+              vectorEffect="non-scaling-stroke"
+              style={{ pointerEvents: 'auto', cursor: 'move' }}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                startDrag({ type: 'ring-handle', ring: 'bottom', key: handle.key }, handle.label);
+              }}
+            />
+          ))}
+
+          {overlay.topHandles.map((handle) => (
+            <circle
+              key={handle.label}
+              cx={handle.x}
+              cy={handle.y}
+              r={TOP_HANDLE_RADIUS}
+              fill={activeHandle === handle.label ? '#0f172a' : topHandleFill}
+              stroke="#fff7ed"
+              strokeWidth={2.5}
+              vectorEffect="non-scaling-stroke"
+              style={{ pointerEvents: 'auto', cursor: 'move' }}
+              onPointerDown={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                startDrag({ type: 'ring-handle', ring: 'top', key: handle.key }, handle.label);
+              }}
+            />
+          ))}
 
           <line
             x1={overlay.rotationAnchor.x}
@@ -997,55 +2476,6 @@ export function App() {
             strokeWidth={2}
             vectorEffect="non-scaling-stroke"
           />
-
-          {overlay.segmentMidpoints.map((segment) => (
-            <g key={`segment-${segment.insertAfter}`} style={{ pointerEvents: 'auto', cursor: 'copy' }}>
-              <circle
-                cx={segment.x}
-                cy={segment.y}
-                r={HANDLE_RADIUS - 1}
-                fill="#f8fafc"
-                stroke="#10b981"
-                strokeWidth={2.5}
-                vectorEffect="non-scaling-stroke"
-                onPointerDown={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  insertVertexAfter(segment.insertAfter);
-                }}
-              />
-              <text
-                x={segment.x}
-                y={segment.y + 3.5}
-                textAnchor="middle"
-                fontSize="11"
-                fontWeight="700"
-                fill="#047857"
-                style={{ userSelect: 'none' }}
-              >
-                +
-              </text>
-            </g>
-          ))}
-
-          {overlay.vertices.map((vertex) => (
-            <circle
-              key={vertex.index}
-              cx={vertex.x}
-              cy={vertex.y}
-              r={HANDLE_RADIUS}
-              fill={selectedVertexIndex === vertex.index ? '#0f172a' : '#ffffff'}
-              stroke={selectedVertexIndex === vertex.index ? '#38bdf8' : '#0369a1'}
-              strokeWidth={3}
-              vectorEffect="non-scaling-stroke"
-              style={{ pointerEvents: 'auto', cursor: 'move' }}
-              onPointerDown={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                startDrag({ type: 'vertex', index: vertex.index }, `vertex-${vertex.index}`, vertex.index);
-              }}
-            />
-          ))}
 
           <circle
             cx={overlay.rotationHandle.x}
@@ -1059,7 +2489,22 @@ export function App() {
             onPointerDown={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              startDrag({ type: 'rotate' }, 'rotate');
+              const modelPointer = getPointerRotatedLocalAtAltitude(
+                event.clientX,
+                event.clientY,
+                shapeStateRef.current.heightMeters,
+              );
+              if (!modelPointer) return;
+
+              startDrag(
+                {
+                  type: 'rotate',
+                  rotationOffsetDeg: normalizeDegrees(
+                    shapeStateRef.current.rotationZ - getRotationFromModelPoint(modelPointer),
+                  ),
+                },
+                'rotate',
+              );
             }}
           />
         </svg>
@@ -1071,7 +2516,7 @@ export function App() {
           position: 'absolute',
           top: 20,
           right: 20,
-          width: '340px',
+          width: '360px',
           background: 'rgba(255,255,255,0.94)',
           padding: '20px',
           borderRadius: '14px',
@@ -1081,52 +2526,18 @@ export function App() {
         }}
       >
         <h3 className="guide-title" style={{ marginTop: 0, color: '#0f172a' }}>
-          3D 도형 설계
+          3D 부채꼴 편집기
         </h3>
-        <p className="guide-text" style={{ fontSize: '13px', lineHeight: '1.6', color: '#334155' }}>
-          도형 내부를 드래그하면 전체 이동, 꼭짓점을 드래그하면 선 모양이 바뀝니다.
-          아래 외곽선 스타일 버튼으로 실선, 점선, 점점선을 바꿀 수 있고,
-          선 중간의 <strong>+</strong> 핸들로 점을 추가할 수 있습니다. 선택된 점은 삭제할 수 있습니다.
-          상단 회전 핸들로 회전하고, 아래 슬라이더로 3D 높이를 편집합니다.
-        </p>
 
-        <div
-          style={{
-            marginBottom: '14px',
-            padding: '12px',
-            borderRadius: '10px',
-            background: reproduceBugs ? 'rgba(239, 68, 68, 0.10)' : 'rgba(16, 185, 129, 0.10)',
-            border: `1px solid ${reproduceBugs ? 'rgba(239, 68, 68, 0.45)' : 'rgba(16, 185, 129, 0.45)'}`,
-          }}
-        >
-          <label className="control-label" style={{ display: 'block', marginBottom: '6px', color: '#334155', fontWeight: 700 }}>
-            회전 버그 재현 (수정 전 동작 비교 — 수정 반영으로 기본 OFF)
-          </label>
-          <button
-            onClick={() => {
-              const next = !reproduceBugsRef.current;
-              reproduceBugsRef.current = next;
-              setReproduceBugs(next);
-            }}
-            style={{
-              width: '100%',
-              padding: '10px 12px',
-              border: 'none',
-              borderRadius: '8px',
-              background: reproduceBugs ? '#ef4444' : '#10b981',
-              color: '#ffffff',
-              cursor: 'pointer',
-              fontWeight: 700,
-            }}
-          >
-            {reproduceBugs ? '재현 ON — 버그 동작' : '재현 OFF — 정상 동작'}
-          </button>
-          <p className="guide-text" style={{ fontSize: '11.5px', lineHeight: '1.55', color: '#475569', margin: '8px 0 0' }}>
-            {reproduceBugs
-              ? '회전 핸들을 돌려보세요: ① 포인터와 반대로 돎(부호 반전), ② 일정 이상 돌리면 반대로 튐(delta 누적).'
-              : '정상: 절대각 + 이중 모듈로 정규화. 포인터를 그대로 따라오고 경계에서 안 튐.'}
-          </p>
-        </div>
+        <p className="guide-text" style={{ fontSize: '13px', lineHeight: '1.6', color: '#334155' }}>
+          하단 <strong>흰색 점</strong>으로 부채꼴 바닥 범위를 편집하고,
+          상단 <strong style={{ color: topHandleFill }}>주황색 점</strong>으로 윗면 캡 모양을 따로 조절합니다.
+          이미지 도형은 PPT 오브젝트처럼 직접 선택해서 이동, 회전, 크기 조절할 수 있습니다.
+          관찰 아이콘은 네비게이션 마커처럼 드래그하면 부채꼴 범위가 같이 이동하고 진행 방향으로 회전합니다.
+          카드 이미지는 상단 높이 평면에 붙어서 함께 움직입니다.
+          <strong>3D 깊이</strong>는 주황색 가이드가 도형 뒤로 가려지는지 확인할 때만 사용합니다.
+          회전 핸들은 시작 각도 오프셋과 상단 평면 기준 포인터 보정을 함께 적용해서 덜덜 떨리던 현상을 줄였습니다.
+        </p>
 
         <div style={{ marginBottom: '14px' }}>
           <label className="control-label" style={{ display: 'block', marginBottom: '6px', color: '#334155' }}>
@@ -1155,34 +2566,113 @@ export function App() {
 
         <div style={{ marginBottom: '14px' }}>
           <label className="control-label" style={{ display: 'block', marginBottom: '6px', color: '#334155' }}>
+            가이드 깊이
+          </label>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, 1fr)', gap: '8px' }}>
+            {iconRenderModeOptions.map((option) => (
+              <button
+                key={option.value}
+                onClick={() => updateIconRenderMode(option.value)}
+                style={{
+                  padding: '9px 10px',
+                  border: 'none',
+                  borderRadius: '8px',
+                  background: iconRenderMode === option.value ? '#0f172a' : '#e2e8f0',
+                  color: iconRenderMode === option.value ? '#ffffff' : '#0f172a',
+                  cursor: 'pointer',
+                  fontWeight: 700,
+                }}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ marginBottom: '14px' }}>
+          <label className="control-label" style={{ display: 'block', marginBottom: '6px', color: '#334155' }}>
             높이: <strong>{Math.round(shapeState.heightMeters).toLocaleString()} m</strong>
           </label>
           <input
             type="range"
             min={MIN_HEIGHT_METERS}
             max={MAX_HEIGHT_METERS}
-            step={5000}
+            step={10}
             value={shapeState.heightMeters}
             onChange={(event) => updateShapeState({ heightMeters: Number(event.target.value) })}
             style={{ width: '100%' }}
           />
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '14px' }}>
+        <div style={{ marginBottom: '14px' }}>
+          <label className="control-label" style={{ display: 'block', marginBottom: '6px', color: '#334155' }}>
+            경로 데모: <strong>{routePlayback.isPlaying ? '재생 중' : '일시정지'}</strong>
+          </label>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px', marginBottom: '8px' }}>
+            <button
+              onClick={toggleRoutePlayback}
+              style={{
+                padding: '10px 12px',
+                border: 'none',
+                borderRadius: '8px',
+                background: routePlayback.isPlaying ? '#0f766e' : '#2563eb',
+                color: '#ffffff',
+                cursor: 'pointer',
+                fontWeight: 700,
+              }}
+            >
+              {routePlayback.isPlaying ? '경로 일시정지' : '경로 재생'}
+            </button>
+            <button
+              onClick={resetRoutePlayback}
+              style={{
+                padding: '10px 12px',
+                border: 'none',
+                borderRadius: '8px',
+                background: '#334155',
+                color: '#ffffff',
+                cursor: 'pointer',
+                fontWeight: 700,
+              }}
+            >
+              경로 리셋
+            </button>
+          </div>
+
+          <div style={{ fontSize: '12px', color: '#475569', lineHeight: '1.55' }}>
+            파란 점선 서울-부산 경로를 따라 부채꼴이 자동 이동합니다.<br />
+            진행률: <strong>{routeProgressPercent.toFixed(0)}%</strong> · 루프: <strong>{(routePlayback.loopDurationMs / 1000).toFixed(0)}초</strong>
+          </div>
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '8px', marginBottom: '14px' }}>
           <button
-            onClick={deleteSelectedVertex}
-            disabled={selectedVertexIndex === null || footprint.length <= 3}
+            onClick={resetTopRing}
             style={{
               padding: '10px 12px',
               border: 'none',
               borderRadius: '8px',
-              background: selectedVertexIndex === null || footprint.length <= 3 ? '#cbd5e1' : '#ef4444',
-              color: selectedVertexIndex === null || footprint.length <= 3 ? '#64748b' : '#ffffff',
-              cursor: selectedVertexIndex === null || footprint.length <= 3 ? 'not-allowed' : 'pointer',
+              background: '#f97316',
+              color: '#ffffff',
+              cursor: 'pointer',
               fontWeight: 700,
             }}
           >
-            선택 점 삭제
+            상단 리셋
+          </button>
+          <button
+            onClick={resetImageShapes}
+            style={{
+              padding: '10px 12px',
+              border: 'none',
+              borderRadius: '8px',
+              background: '#0f172a',
+              color: '#ffffff',
+              cursor: 'pointer',
+              fontWeight: 700,
+            }}
+          >
+            이미지 리셋
           </button>
           <button
             onClick={resetEditor}
@@ -1196,28 +2686,40 @@ export function App() {
               fontWeight: 700,
             }}
           >
-            초기화
+            전체 초기화
           </button>
         </div>
 
         <p className="guide-text" style={{ fontSize: '12px', lineHeight: '1.55', color: '#475569', marginBottom: '10px' }}>
-          점 삭제는 <strong>Delete</strong> 또는 <strong>Backspace</strong> 키로도 가능합니다.
-          단, 선이 서로 교차하는 복잡한 폴리곤은 메쉬가 예상과 다르게 보일 수 있습니다.
+          회전은 상단 검은 핸들을 드래그합니다. 도형 내부 드래그는 전체 이동,
+          흰색 점은 바닥 범위, 주황색 점은 상단 모양 편집입니다.
+          관찰 아이콘 드래그는 네비게이션 이동, 경로 재생은 자동 주행 데모,
+          다른 이미지 도형은 둥근 핸들로 회전하고 오른쪽 아래 핸들로 확대/축소합니다.
         </p>
 
         <p className="guide-text" style={{ fontSize: '12px', lineHeight: '1.6', color: '#0f172a', marginBottom: '10px' }}>
-          point count: <strong>{footprint.length}</strong><br />
+          shape mode: <strong>fan-sector</strong><br />
           outline style: <strong>{outlineStyle}</strong><br />
-          selected point: <strong>{selectedVertexIndex === null ? '-' : selectedVertexIndex + 1}</strong><br />
-          center: <strong>{shapeState.centerLng.toFixed(4)}, {shapeState.centerLat.toFixed(4)}</strong><br />
-          rotation: <strong>{shapeState.rotationZ.toFixed(1)}deg</strong><br />
-          rotate mode: <strong>{reproduceBugs ? '재현(버그)' : '정상'}</strong>
+          guide depth: <strong>{iconRenderMode}</strong><br />
+          route demo: <strong>{routePlayback.isPlaying ? 'playing' : 'paused'}</strong><br />
+          bottom range: <strong>{bottomRangeMeters.toLocaleString()} m</strong><br />
+          top range: <strong>{topRangeMeters.toLocaleString()} m</strong><br />
+          rotation: <strong>{shapeState.rotationZ.toFixed(1)}deg</strong>
         </p>
 
-        {selectedVertex ? (
+        <p className="guide-text" style={{ fontSize: '12px', lineHeight: '1.6', color: '#0f172a', marginBottom: '10px' }}>
+          top apex: <strong>{Math.round(topRing.apex.x).toLocaleString()}, {Math.round(topRing.apex.y).toLocaleString()} m</strong><br />
+          top arc center: <strong>{Math.round(topRing.center.x).toLocaleString()}, {Math.round(topRing.center.y).toLocaleString()} m</strong><br />
+          center: <strong>{shapeState.centerLng.toFixed(4)}, {shapeState.centerLat.toFixed(4)}</strong>
+        </p>
+
+        {selectedImage ? (
           <p className="guide-text" style={{ fontSize: '12px', lineHeight: '1.6', color: '#0f172a', marginBottom: '10px' }}>
-            selected local x: <strong>{Math.round(selectedVertex.x).toLocaleString()} m</strong><br />
-            selected local y: <strong>{Math.round(selectedVertex.y).toLocaleString()} m</strong>
+            selected image: <strong>{selectedImage.label}</strong><br />
+            altitude: <strong>{selectedImage.altitudeMode}</strong><br />
+            local: <strong>{Math.round(selectedImage.localPoint.x).toLocaleString()}, {Math.round(selectedImage.localPoint.y).toLocaleString()} m</strong><br />
+            rotation: <strong>{selectedImage.rotationDeg.toFixed(1)}deg</strong><br />
+            scale: <strong>{selectedImage.scale.toFixed(2)}x</strong>
           </p>
         ) : null}
 
