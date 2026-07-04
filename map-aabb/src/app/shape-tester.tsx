@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
 
@@ -123,21 +123,78 @@ function shapeLocalWorldVerts(shape: Shape): V[] {
   return shape.local.map((lp) => rotate(scaleV(lp, shape.scale), shape.rotationDeg));
 }
 
+/**
+ * 선택된 자식들의 tight 그룹 박스 (회전된 그룹 로컬 프레임의 AABB).
+ * rotationDeg는 지속 상태(groupRotation)에서 받는다. 나머지는 자식에서 도출 → 항상 tight.
+ */
+function computeGroupBox(sel: Shape[], rotationDeg: number): GroupBox {
+  let sx = 0;
+  let sy = 0;
+  for (const s of sel) {
+    const m = maplibregl.MercatorCoordinate.fromLngLat([s.center.lng, s.center.lat], 0);
+    sx += m.x;
+    sy += m.y;
+  }
+  const cm = new maplibregl.MercatorCoordinate(sx / sel.length, sy / sel.length, 0).toLngLat();
+  const center: LngLat = { lng: cm.lng, lat: cm.lat };
+  const mf = new MeterFrame(center);
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const s of sel) {
+    const sf = new MeterFrame(s.center);
+    for (const v of shapeLocalWorldVerts(s)) {
+      const gl = rotate(mf.toMeters(sf.toLngLat(v)), -rotationDeg); // 그룹 로컬 축
+      minX = Math.min(minX, gl.x);
+      minY = Math.min(minY, gl.y);
+      maxX = Math.max(maxX, gl.x);
+      maxY = Math.max(maxY, gl.y);
+    }
+  }
+  return {
+    center,
+    rotationDeg,
+    boxCenterLocal: { x: (minX + maxX) / 2, y: (minY + maxY) / 2 },
+    half: { x: (maxX - minX) / 2, y: (maxY - minY) / 2 },
+  };
+}
+
 const HANDLE = 8;
 const ROT_OFFSET_M = 45;
-const ROT_OFFSET_PX = 34; // 그룹 회전 핸들 화면 오프셋
 
 // ---- 드래그 상태 ----
 type Snapshot = { id: string; center: LngLat; rotationDeg: number; scale: V };
 
+/**
+ * 그룹 선택 박스 (OBB). 회전각만 지속 상태(groupRotation)로 두고,
+ * 박스 자체는 "회전된 그룹 로컬 프레임의 AABB"로 매 렌더 tight하게 도출한다.
+ * - 회전: 자식이 그룹 로컬에서 안 움직임 → 박스가 강체로 회전 (안 튐)
+ * - 스케일: 박스가 자식을 항상 tight하게 감쌈 (안 삐져나옴)
+ */
+type GroupBox = {
+  center: LngLat;      // 프레임 원점 (자식 중심들의 centroid)
+  rotationDeg: number;
+  boxCenterLocal: V;   // AABB 중심 (그룹 로컬 미터)
+  half: V;             // AABB half (그룹 로컬 미터)
+};
+
 type Drag =
   | { kind: 'move'; ids: string[]; snaps: Snapshot[]; pointerStart: LngLat }
   | {
-      kind: 'rotate' | 'group-rotate';
+      kind: 'rotate';
       ids: string[];
       snaps: Snapshot[];
-      pivot: LngLat;              // 회전 중심 (드래그 내내 고정, E-5)
+      frame: MeterFrame;          // 원점 = 도형 중심 (피벗)
+      handleAngleStart: number;
+    }
+  | {
+      kind: 'group-rotate';
+      ids: string[];
+      snaps: Snapshot[];
+      center: LngLat;             // 그룹 피벗 (고정, E-5)
       frame: MeterFrame;
+      rotStart: number;
       handleAngleStart: number;
     }
   | {
@@ -151,13 +208,13 @@ type Drag =
       kind: 'group-scale';
       ids: string[];
       snaps: Snapshot[];
-      box: ScreenBox;            // 화면 픽셀 박스 (드래그 시작 고정)
-      dir: V;                    // 핸들 방향 (화면축)
-    }
-  ;
-
-/** 화면 픽셀 AABB */
-type ScreenBox = { cx: number; cy: number; hx: number; hy: number };
+      center: LngLat;             // 그룹 프레임 시작 중심 (고정)
+      frame: MeterFrame;
+      rotStart: number;           // 그룹 회전 (드래그 내내 고정)
+      halfStart: V;               // 그룹 half 시작값 (미터)
+      anchorLocal: V;             // 반대편 모서리 (그룹 로컬)
+      dir: V;                     // 핸들 방향 (그룹 로컬축)
+    };
 
 /** 8개 핸들 방향: 모서리 4 + 각 변 중앙(L·R·T·B) 4. +Y = 위(북). */
 const HANDLE_DIRS: V[] = [
@@ -185,6 +242,7 @@ export function ShapeTester() {
   const [shapes, setShapes] = useState<Shape[]>(() => initialShapes());
   const [selected, setSelected] = useState<string[]>([]);
   const [buggyAngle, setBuggyAngle] = useState(false);
+  const [groupRotation, setGroupRotation] = useState(0); // 그룹 지속 회전각 (나머지는 자식에서 도출)
 
   const shapesRef = useRef(shapes);
   shapesRef.current = shapes;
@@ -192,6 +250,8 @@ export function ShapeTester() {
   selectedRef.current = selected;
   const buggyRef = useRef(buggyAngle);
   buggyRef.current = buggyAngle;
+  const groupRotationRef = useRef(groupRotation);
+  groupRotationRef.current = groupRotation;
   const dragRef = useRef<Drag | null>(null);
 
   // ---- 맵 초기화 ----
@@ -256,48 +316,15 @@ export function ShapeTester() {
     return buggyRef.current ? -raw : raw;
   }, []);
 
-  // ---- 그룹 정보 ----
-  // - center/frame: 회전용 (미터 프레임, 피벗 = 중심)
-  // - box: 표시·리사이즈용 화면 픽셀 AABB (앵커를 픽셀로 고정하기 위해 화면 공간에서 계산)
-  const groupInfo = useMemo(() => {
-    if (!mapReady || selected.length < 2 || !mapRef.current) return null;
-    const map = mapRef.current;
-    const sel = shapesRef.current.filter((s) => selected.includes(s.id));
-    // 회전 피벗 = 자식 중심들의 평균 (mercator)
-    let sx = 0;
-    let sy = 0;
-    for (const s of sel) {
-      const m = maplibregl.MercatorCoordinate.fromLngLat([s.center.lng, s.center.lat], 0);
-      sx += m.x;
-      sy += m.y;
-    }
-    const cm = new maplibregl.MercatorCoordinate(sx / sel.length, sy / sel.length, 0).toLngLat();
-    const center: LngLat = { lng: cm.lng, lat: cm.lat };
-    const frame = new MeterFrame(center);
-    // 화면 픽셀 AABB
-    let minX = Infinity;
-    let minY = Infinity;
-    let maxX = -Infinity;
-    let maxY = -Infinity;
-    for (const s of sel) {
-      const sf = new MeterFrame(s.center);
-      for (const v of shapeLocalWorldVerts(s)) {
-        const ll = sf.toLngLat(v);
-        const p = map.project([ll.lng, ll.lat]);
-        minX = Math.min(minX, p.x);
-        minY = Math.min(minY, p.y);
-        maxX = Math.max(maxX, p.x);
-        maxY = Math.max(maxY, p.y);
-      }
-    }
-    const box: ScreenBox = {
-      cx: (minX + maxX) / 2,
-      cy: (minY + maxY) / 2,
-      hx: (maxX - minX) / 2,
-      hy: (maxY - minY) / 2,
-    };
-    return { center, frame, box, ids: sel.map((s) => s.id) };
-  }, [selected, mapReady, shapes]);
+  // ---- 그룹 회전각 리셋 (선택 SET이 바뀔 때만) ----
+  useEffect(() => {
+    setGroupRotation(0);
+  }, [selected]);
+
+  // ---- 그룹 박스 도출 (매 렌더, tight) ----
+  const groupSel = selected.length >= 2 ? shapes.filter((s) => selected.includes(s.id)) : [];
+  const groupBox =
+    mapReady && groupSel.length >= 2 ? computeGroupBox(groupSel, groupRotation) : null;
 
   // ---- 드래그 시작 ----
   const snapOf = (ids: string[]): Snapshot[] =>
@@ -306,6 +333,7 @@ export function ShapeTester() {
       .map((s) => ({ id: s.id, center: { ...s.center }, rotationDeg: s.rotationDeg, scale: { ...s.scale } }));
 
   const beginMove = (e: React.PointerEvent, ids: string[]) => {
+    // 그룹 박스는 자식에서 도출되므로 이동 시 자동으로 따라온다 (별도 처리 불필요).
     dragRef.current = { kind: 'move', ids, snaps: snapOf(ids), pointerStart: pointerLngLat(e) };
   };
   const beginSingleRotate = (e: React.PointerEvent, id: string) => {
@@ -318,7 +346,6 @@ export function ShapeTester() {
       kind: 'rotate',
       ids: [id],
       snaps: snapOf([id]),
-      pivot: { ...s.center },
       frame,
       handleAngleStart: measureAngle({ x: 0, y: 0 }, pm),
     };
@@ -337,27 +364,39 @@ export function ShapeTester() {
   };
   const beginGroupRotate = (e: React.PointerEvent) => {
     e.stopPropagation();
-    const g = groupInfo;
-    if (!g) return;
-    const pm = g.frame.toMeters(pointerLngLat(e));
+    const sel = shapesRef.current.filter((s) => selectedRef.current.includes(s.id));
+    if (sel.length < 2) return;
+    const gb = computeGroupBox(sel, groupRotationRef.current);
+    const frame = new MeterFrame(gb.center); // 피벗 = centroid (회전에 불변)
+    const pm = frame.toMeters(pointerLngLat(e));
     dragRef.current = {
       kind: 'group-rotate',
-      ids: g.ids,
-      snaps: snapOf(g.ids),
-      pivot: g.center,
-      frame: g.frame,
+      ids: selectedRef.current,
+      snaps: snapOf(selectedRef.current),
+      center: gb.center,
+      frame,
+      rotStart: groupRotationRef.current,
       handleAngleStart: measureAngle({ x: 0, y: 0 }, pm),
     };
   };
   const beginGroupScale = (e: React.PointerEvent, dir: V) => {
     e.stopPropagation();
-    const g = groupInfo;
-    if (!g) return;
+    const sel = shapesRef.current.filter((s) => selectedRef.current.includes(s.id));
+    if (sel.length < 2) return;
+    const gb = computeGroupBox(sel, groupRotationRef.current);
     dragRef.current = {
       kind: 'group-scale',
-      ids: g.ids,
-      snaps: snapOf(g.ids),
-      box: { ...g.box }, // 화면 픽셀 박스 고정
+      ids: selectedRef.current,
+      snaps: snapOf(selectedRef.current),
+      center: gb.center,
+      frame: new MeterFrame(gb.center),
+      rotStart: gb.rotationDeg,
+      halfStart: { ...gb.half },
+      // 반대편 모서리 (그룹 로컬). 박스가 off-center일 수 있으므로 boxCenterLocal 기준.
+      anchorLocal: {
+        x: gb.boxCenterLocal.x - dir.x * gb.half.x,
+        y: gb.boxCenterLocal.y - dir.y * gb.half.y,
+      },
       dir,
     };
   };
@@ -386,15 +425,28 @@ export function ShapeTester() {
         return;
       }
 
-      if (d.kind === 'rotate' || d.kind === 'group-rotate') {
+      if (d.kind === 'rotate') {
+        // 단일 도형 제자리 회전
         const pm = d.frame.toMeters(pointerLngLat(e));
-        const now = measureAngle({ x: 0, y: 0 }, pm);
-        const total = now - d.handleAngleStart; // 절대 - 시작 (A-1/A-2)
+        const total = measureAngle({ x: 0, y: 0 }, pm) - d.handleAngleStart;
         setShapes((prev) =>
           prev.map((s) => {
             const snap = d.snaps.find((n) => n.id === s.id);
             if (!snap) return s;
-            // 스냅샷 중심 오프셋(미터, 그룹 프레임)을 total 만큼 회전 (누산 없음)
+            return { ...s, rotationDeg: normalizeDeg(snap.rotationDeg + total) };
+          }),
+        );
+        return;
+      }
+
+      if (d.kind === 'group-rotate') {
+        const pm = d.frame.toMeters(pointerLngLat(e));
+        const total = measureAngle({ x: 0, y: 0 }, pm) - d.handleAngleStart; // 절대 - 시작 (A-2)
+        setShapes((prev) =>
+          prev.map((s) => {
+            const snap = d.snaps.find((n) => n.id === s.id);
+            if (!snap) return s;
+            // 자식 중심 오프셋을 그룹 중심 기준 total 만큼 회전 (누산 없음)
             const offset = d.frame.toMeters(snap.center);
             const newCenterLL = d.frame.toLngLat(rotate(offset, total));
             return {
@@ -404,6 +456,8 @@ export function ShapeTester() {
             };
           }),
         );
+        // 지속 회전각만 갱신. 박스는 다음 렌더에 자식에서 tight하게 도출 → 강체 회전(안 튐).
+        setGroupRotation(normalizeDeg(d.rotStart + total));
         return;
       }
 
@@ -436,32 +490,35 @@ export function ShapeTester() {
       }
 
       if (d.kind === 'group-scale') {
-        // PPT 방식: 그룹 박스 반대편을 화면 픽셀로 고정. 자식들 위치/크기 전달.
-        const map = mapRef.current;
-        const P = pointerScreen(e); // 화면 픽셀
-        const b = d.box;
+        // OBB 리사이즈: 그룹 로컬(회전된) 축에서 반대편 모서리 고정. 자식 위치·크기 전달.
+        const pm = d.frame.toMeters(pointerLngLat(e));
+        const pLocal = rotate(pm, -d.rotStart); // 그룹 로컬 축 (회전 제거)
+        const A = d.anchorLocal;
         const cx = d.dir.x !== 0;
         const cy = d.dir.y !== 0;
-        const anchorX = b.cx - d.dir.x * b.hx; // 반대편 변 (화면 픽셀, 고정)
-        const anchorY = b.cy - d.dir.y * b.hy;
-        const sx = cx ? Math.max(0.05, Math.abs(P.x - anchorX) / Math.max(1, 2 * b.hx)) : 1;
-        const sy = cy ? Math.max(0.05, Math.abs(P.y - anchorY) / Math.max(1, 2 * b.hy)) : 1;
+        const newHalfX = cx ? Math.max(MIN_HALF_M, Math.abs(pLocal.x - A.x) / 2) : d.halfStart.x;
+        const newHalfY = cy ? Math.max(MIN_HALF_M, Math.abs(pLocal.y - A.y) / 2) : d.halfStart.y;
+        const sX = cx ? newHalfX / d.halfStart.x : 1;
+        const sY = cy ? newHalfY / d.halfStart.y : 1;
         setShapes((prev) =>
           prev.map((s) => {
             const snap = d.snaps.find((n) => n.id === s.id);
             if (!snap) return s;
-            // 자식 중심을 화면에서 P' = A + S·(P₀ − A) (앵커 픽셀 고정)
-            const c0 = map.project([snap.center.lng, snap.center.lat]);
-            const nx = cx ? anchorX + (c0.x - anchorX) * sx : c0.x;
-            const ny = cy ? anchorY + (c0.y - anchorY) * sy : c0.y;
-            const ll = map.unproject([nx, ny]);
+            // 자식 중심을 그룹 로컬 프레임에서 A 기준 스케일 (P' = A + S·(P₀ − A))
+            const offLocal = rotate(d.frame.toMeters(snap.center), -d.rotStart);
+            const newOffLocal = {
+              x: cx ? A.x + (offLocal.x - A.x) * sX : offLocal.x,
+              y: cy ? A.y + (offLocal.y - A.y) * sY : offLocal.y,
+            };
+            const newCenterLL = d.frame.toLngLat(rotate(newOffLocal, d.rotStart));
             return {
               ...s,
-              center: { lng: ll.lng, lat: ll.lat },
-              scale: { x: snap.scale.x * (cx ? sx : 1), y: snap.scale.y * (cy ? sy : 1) },
+              center: newCenterLL,
+              scale: { x: snap.scale.x * (cx ? sX : 1), y: snap.scale.y * (cy ? sY : 1) },
             };
           }),
         );
+        // 박스는 다음 렌더에 자식에서 tight하게 도출 → 항상 자식을 감쌈(안 삐져나옴).
         return;
       }
     };
@@ -543,12 +600,13 @@ export function ShapeTester() {
             />
           )}
 
-          {groupInfo && (
+          {groupBox && (
             <GroupHandles
-              box={groupInfo.box}
+              box={groupBox}
+              project={project}
               onRotate={beginGroupRotate}
               onScale={(e, dir) => beginGroupScale(e, dir)}
-              onMove={(e) => beginMove(e, groupInfo.ids)}
+              onMove={(e) => beginMove(e, selected)}
             />
           )}
         </svg>
@@ -648,53 +706,58 @@ function SingleHandles({
 
 function GroupHandles({
   box,
+  project,
   onRotate,
   onScale,
   onMove,
 }: {
-  box: ScreenBox;
+  box: GroupBox;
+  project: (ll: LngLat) => V;
   onRotate: (e: React.PointerEvent) => void;
   onScale: (e: React.PointerEvent, dir: V) => void;
   onMove: (e: React.PointerEvent) => void;
 }) {
-  const { cx, cy, hx, hy } = box; // 화면 픽셀
-  const left = cx - hx;
-  const right = cx + hx;
-  const top = cy - hy; // 화면 위 = 작은 Y
-  const bottom = cy + hy;
-  const rotPtY = top - ROT_OFFSET_PX;
+  // OBB: 그룹 로컬 → 회전 → 미터 프레임 → 화면 (단일 도형과 동일 방식)
+  const mf = new MeterFrame(box.center);
+  const c = box.boxCenterLocal;
+  const half = box.half;
+  const toScreen = (local: V) =>
+    project(mf.toLngLat(rotate({ x: c.x + local.x, y: c.y + local.y }, box.rotationDeg)));
+  const outline = [
+    { x: -half.x, y: half.y },
+    { x: half.x, y: half.y },
+    { x: half.x, y: -half.y },
+    { x: -half.x, y: -half.y },
+  ].map(toScreen);
+  const topEdge = toScreen({ x: 0, y: half.y });
+  const rotPt = toScreen({ x: 0, y: half.y + ROT_OFFSET_M });
 
   return (
     <g>
-      <rect
-        x={left}
-        y={top}
-        width={hx * 2}
-        height={hy * 2}
+      <polygon
+        points={outline.map((p) => `${p.x},${p.y}`).join(' ')}
         fill="#5b8cff14"
         stroke="#5b8cff"
         strokeWidth={2}
         style={{ cursor: 'move', pointerEvents: 'auto' }}
         onPointerDown={onMove}
       />
-      <line x1={cx} y1={top} x2={cx} y2={rotPtY} stroke="#ffd93b" pointerEvents="none" />
+      <line x1={topEdge.x} y1={topEdge.y} x2={rotPt.x} y2={rotPt.y} stroke="#ffd93b" pointerEvents="none" />
       <circle
-        cx={cx}
-        cy={rotPtY}
+        cx={rotPt.x}
+        cy={rotPt.y}
         r={HANDLE}
         fill="#ffd93b"
         style={{ cursor: 'grab', pointerEvents: 'auto' }}
         onPointerDown={onRotate}
       />
       {HANDLE_DIRS.map((dir, i) => {
-        // dir는 화면축: x=+1 오른쪽, y=+1 아래
-        const px = cx + dir.x * hx;
-        const py = cy + dir.y * hy;
+        const p = toScreen({ x: dir.x * half.x, y: dir.y * half.y });
         return (
           <rect
             key={i}
-            x={px - HANDLE / 2}
-            y={py - HANDLE / 2}
+            x={p.x - HANDLE / 2}
+            y={p.y - HANDLE / 2}
             width={HANDLE}
             height={HANDLE}
             fill="#5b8cff"
