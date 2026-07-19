@@ -1,5 +1,7 @@
 # 그룹 리사이즈 앵커 고정 — 화면 픽셀 공간 수정 (적용 가이드)
 
+> **2026-07 현재 구현 주의:** 이 문서는 문제를 추적한 과거 설계를 포함한다. pitch/bearing을 잠그는 결론과 `{rotation, scale}`만 유지한다는 제한은 현재 구현에 적용되지 않는다. 최신 기준은 `PITCH_BEARING_TRANSFORM_IMPLEMENTATION.md`이며, 지면 로컬 OBB + 비파괴 live 2×2 affine + 변환 중에만 카메라 입력 잠금을 사용한다.
+
 > **대상 증상**: 그룹 선택상자의 한 핸들을 드래그할 때 **반대편 변(앵커)이 화면에서 고정되지 않고 밀린다.**
 > **결론**: 리사이즈 앵커/스케일을 **렌더링·상호작용과 같은 프레임(=화면 픽셀)** 에서 계산하면 해결. 다른 프레임(mercator 미터/모델 좌표)에서 계산해 화면에 그리면, 카메라가 조금만 회전·pitch돼도 앵커가 화면에서 밀린다.
 > 관련: `RESIZE_ANCHOR_ANALYSIS.md`(원인 후보), `RESIZE_ANCHOR_FOLLOWUP.md`(다른 프로젝트 오진 분석), `GROUP_TRANSFORM_ISSUES.md`.
@@ -205,5 +207,7 @@ startAnchorPx = 드래그 시작 시 반대편 변의 화면 좌표      // 1회
 - 지속 상태 `groupRotation`: 선택 SET 변경 시 0으로 리셋, 그룹 회전 시에만 갱신
 - `group-rotate`: 자식은 centroid 기준 회전 + 회전각 갱신, 박스는 다음 렌더에 도출(강체 회전)
 - `group-scale`: 그룹 로컬 OBB 리사이즈, 반대편 모서리(anchorLocal) 스냅샷 고정 `P' = A + S·(P₀ − A)`
-- 맵: `maxPitch: 0` + `dragRotate.disable()` (화면축=평면 고정)
+- 자식 `linear`: 일반 2×2 live affine 행렬. 혼합 회전 자식의 비균일 그룹 스케일에서 필요한 전단을 비파괴적으로 보존
+- 카메라 입력: 평상시 pitch/bearing 허용, 도형 변환 중에만 임시 잠금하고 완료·취소 시 이전 상태 복구
+- 맵: 초기 `pitch: 0`은 유지하지만 pitch/bearing 조작은 허용한다. 따라서 §2의 평면 고정 가정에만 의존하지 말고, 회전·기울기 상태에서도 `project`/`unproject`와 그룹 로컬 OBB의 앵커 고정을 검증해야 한다.
 - 단일 도형: 도형 자신의 로컬 프레임(OBB) 기준 — 회전돼도 자기 프레임이 일관되어 정상 (그룹도 이와 동일한 원리를 프레임 상태로 부여한 것).

@@ -7,6 +7,7 @@
     "start": "nx serve",
     "build": "nx build",
     "test": "nx test",
+    "test:transforms": "vitest run map-aabb/src/app/transform-math.test.ts",
     "word:md": "node scripts/word-to-markdown.cjs",
     "dev:web": "nx serve map-aabb",
     "build:web": "nx build map-aabb",

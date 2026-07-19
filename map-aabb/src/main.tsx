@@ -1,16 +1,19 @@
 import { StrictMode, useState } from 'react';
 import * as ReactDOM from 'react-dom/client';
 import App from './app/app';
+import PitchBearingTester from './app/pitch-bearing-tester';
 import ShapeTester from './app/shape-tester';
 
-type Mode = 'tester' | 'editor3d';
+type Mode = 'tester' | 'camera-test' | 'editor3d';
 
 function Root() {
   const [mode, setMode] = useState<Mode>('tester');
 
   return (
     <div style={{ position: 'absolute', inset: 0 }}>
-      {mode === 'tester' ? <ShapeTester /> : <App />}
+      {mode === 'tester' ? <ShapeTester /> : null}
+      {mode === 'camera-test' ? <PitchBearingTester /> : null}
+      {mode === 'editor3d' ? <App /> : null}
       <div
         style={{
           position: 'absolute',
@@ -27,6 +30,12 @@ function Root() {
           style={tabStyle(mode === 'tester')}
         >
           도형 테스터
+        </button>
+        <button
+          onClick={() => setMode('camera-test')}
+          style={tabStyle(mode === 'camera-test')}
+        >
+          Pitch/Bearing 테스트
         </button>
         <button
           onClick={() => setMode('editor3d')}

@@ -1,6 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import maplibregl from 'maplibre-gl';
 import 'maplibre-gl/dist/maplibre-gl.css';
+import {
+  IDENTITY_M2,
+  anchoredAxisScale,
+  applyM2,
+  isFiniteM2,
+  isFiniteV,
+  matrixAxisLengths,
+  multiplyM2,
+  normalizeDeg,
+  rad2deg,
+  rotateVector,
+  scaleLinearInParentFrame,
+  scaleM2,
+  transformPointAroundAnchor,
+  type M2,
+  type V,
+} from './transform-math';
 
 /**
  * 그룹 도형 / 단일 도형 변환 테스터 (MapLibre 맵 위 SVG 오버레이)
@@ -16,7 +33,6 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 const STYLE_URL = 'https://basemaps.cartocdn.com/gl/positron-gl-style/style.json';
 const CENTER: [number, number] = [126.978, 37.5665];
 
-type V = { x: number; y: number };
 type LngLat = { lng: number; lat: number };
 
 type Shape = {
@@ -24,24 +40,9 @@ type Shape = {
   color: string;
   center: LngLat;      // 도형 중심 (지도 좌표)
   rotationDeg: number; // 로컬 미터 프레임(+Y 북) 기준 회전
-  scale: V;
+  linear: M2;          // 로컬 정점에 적용되는 일반 2x2 변형(비균일 스케일·전단 포함)
   local: V[];          // 중심 기준 로컬 미터 정점
 };
-
-const DEG = Math.PI / 180;
-const deg2rad = (d: number) => d * DEG;
-const rad2deg = (r: number) => r / DEG;
-const normalizeDeg = (v: number) => ((v % 360) + 360) % 360;
-
-function rotate(p: V, deg: number): V {
-  const r = deg2rad(deg);
-  const c = Math.cos(r);
-  const s = Math.sin(r);
-  return { x: p.x * c - p.y * s, y: p.x * s + p.y * c };
-}
-const add = (a: V, b: V): V => ({ x: a.x + b.x, y: a.y + b.y });
-const sub = (a: V, b: V): V => ({ x: a.x - b.x, y: a.y - b.y });
-const scaleV = (a: V, s: V): V => ({ x: a.x * s.x, y: a.y * s.y });
 
 /**
  * lng/lat 중심 기준 로컬 미터 프레임.
@@ -75,7 +76,7 @@ function makePoly(center: LngLat, n: number, r: number, color: string): Shape {
     const a = (i / n) * Math.PI * 2 + Math.PI / 2;
     local.push({ x: Math.cos(a) * r, y: Math.sin(a) * r });
   }
-  return { id: `s${idCounter++}`, color, center, rotationDeg: 0, scale: { x: 1, y: 1 }, local };
+  return { id: `s${idCounter++}`, color, center, rotationDeg: 0, linear: { ...IDENTITY_M2 }, local };
 }
 function makeRect(center: LngLat, w: number, h: number, color: string): Shape {
   return {
@@ -83,7 +84,7 @@ function makeRect(center: LngLat, w: number, h: number, color: string): Shape {
     color,
     center,
     rotationDeg: 0,
-    scale: { x: 1, y: 1 },
+    linear: { ...IDENTITY_M2 },
     local: [
       { x: -w / 2, y: h / 2 },
       { x: w / 2, y: h / 2 },
@@ -109,18 +110,26 @@ function initialShapes(): Shape[] {
   ];
 }
 
-function localHalfSize(shape: Shape): V {
-  let mx = 0;
-  let my = 0;
+function shapeLocalBounds(shape: Shape): { center: V; half: V } {
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
   for (const lp of shape.local) {
-    mx = Math.max(mx, Math.abs(lp.x * shape.scale.x));
-    my = Math.max(my, Math.abs(lp.y * shape.scale.y));
+    const transformed = applyM2(shape.linear, lp);
+    minX = Math.min(minX, transformed.x);
+    minY = Math.min(minY, transformed.y);
+    maxX = Math.max(maxX, transformed.x);
+    maxY = Math.max(maxY, transformed.y);
   }
-  return { x: mx, y: my };
+  return {
+    center: { x: (minX + maxX) / 2, y: (minY + maxY) / 2 },
+    half: { x: (maxX - minX) / 2, y: (maxY - minY) / 2 },
+  };
 }
 /** 도형의 로컬 미터 정점 (스케일+회전 적용, 중심 기준) */
 function shapeLocalWorldVerts(shape: Shape): V[] {
-  return shape.local.map((lp) => rotate(scaleV(lp, shape.scale), shape.rotationDeg));
+  return shape.local.map((lp) => rotateVector(applyM2(shape.linear, lp), shape.rotationDeg));
 }
 
 /**
@@ -145,7 +154,7 @@ function computeGroupBox(sel: Shape[], rotationDeg: number): GroupBox {
   for (const s of sel) {
     const sf = new MeterFrame(s.center);
     for (const v of shapeLocalWorldVerts(s)) {
-      const gl = rotate(mf.toMeters(sf.toLngLat(v)), -rotationDeg); // 그룹 로컬 축
+      const gl = rotateVector(mf.toMeters(sf.toLngLat(v)), -rotationDeg); // 그룹 로컬 축
       minX = Math.min(minX, gl.x);
       minY = Math.min(minY, gl.y);
       maxX = Math.max(maxX, gl.x);
@@ -164,7 +173,7 @@ const HANDLE = 8;
 const ROT_OFFSET_M = 45;
 
 // ---- 드래그 상태 ----
-type Snapshot = { id: string; center: LngLat; rotationDeg: number; scale: V };
+type Snapshot = { id: string; center: LngLat; rotationDeg: number; linear: M2 };
 
 /**
  * 그룹 선택 박스 (OBB). 회전각만 지속 상태(groupRotation)로 두고,
@@ -201,7 +210,8 @@ type Drag =
       kind: 'resize';
       id: string;
       snap: Snapshot;
-      halfUnit: V;                // 로컬 half (pre-scale)
+      halfStart: V;
+      anchorLocal: V;
       dir: V;                     // 핸들 방향 (-1/0/1)
     }
   | {
@@ -231,9 +241,41 @@ function cursorForDir(dir: V): string {
   if (dir.x !== 0 && dir.y !== 0) return dir.x * dir.y > 0 ? 'nesw-resize' : 'nwse-resize';
   return dir.x !== 0 ? 'ew-resize' : 'ns-resize';
 }
+function cursorForScreenAxis(center: V, handle: V, fallbackDir: V): string {
+  const dx = handle.x - center.x;
+  const dy = handle.y - center.y;
+  if (!Number.isFinite(dx) || !Number.isFinite(dy) || Math.hypot(dx, dy) < 1e-6) {
+    return cursorForDir(fallbackDir);
+  }
+  const angle = ((rad2deg(Math.atan2(dy, dx)) % 180) + 180) % 180;
+  if (angle < 22.5 || angle >= 157.5) return 'ew-resize';
+  if (angle < 67.5) return 'nwse-resize';
+  if (angle < 112.5) return 'ns-resize';
+  return 'nesw-resize';
+}
+function preparePrimaryPointer(e: React.PointerEvent) {
+  if (e.button !== 0) return false;
+  e.preventDefault();
+  e.stopPropagation();
+  e.currentTarget.setPointerCapture?.(e.pointerId);
+  return true;
+}
 const MIN_HALF_M = 2; // 최소 half 크기(미터)
+const MAX_SCALE_FACTOR = 100;
 
-export function ShapeTester() {
+type CameraControlSnapshot = Array<{
+  wasEnabled: boolean;
+  enable: () => void;
+  disable: () => void;
+}>;
+
+type ShapeTesterProps = {
+  diagnostics?: boolean;
+  initialPitch?: number;
+  initialBearing?: number;
+};
+
+export function ShapeTester({ diagnostics = false, initialPitch = 0, initialBearing = 0 }: ShapeTesterProps = {}) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const [mapReady, setMapReady] = useState(false);
@@ -243,6 +285,8 @@ export function ShapeTester() {
   const [selected, setSelected] = useState<string[]>([]);
   const [buggyAngle, setBuggyAngle] = useState(false);
   const [groupRotation, setGroupRotation] = useState(0); // 그룹 지속 회전각 (나머지는 자식에서 도출)
+  const [cameraState, setCameraState] = useState({ pitch: initialPitch, bearing: initialBearing, zoom: 15 });
+  const [cameraLocked, setCameraLocked] = useState(false);
 
   const shapesRef = useRef(shapes);
   shapesRef.current = shapes;
@@ -253,6 +297,70 @@ export function ShapeTester() {
   const groupRotationRef = useRef(groupRotation);
   groupRotationRef.current = groupRotation;
   const dragRef = useRef<Drag | null>(null);
+  const cameraControlsRef = useRef<CameraControlSnapshot | null>(null);
+
+  const unlockCameraControls = useCallback(() => {
+    const controls = cameraControlsRef.current;
+    cameraControlsRef.current = null;
+    if (!controls) return;
+    for (const control of controls) {
+      if (control.wasEnabled) control.enable();
+    }
+    setCameraLocked(false);
+  }, []);
+
+  const lockCameraControls = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || cameraControlsRef.current) return;
+    map.stop();
+    const handlers = [
+      map.dragPan,
+      map.dragRotate,
+      map.scrollZoom,
+      map.boxZoom,
+      map.doubleClickZoom,
+      map.keyboard,
+      map.touchZoomRotate,
+      map.touchPitch,
+    ];
+    cameraControlsRef.current = handlers.map((handler) => ({
+      wasEnabled: handler.isEnabled(),
+      enable: () => handler.enable(),
+      disable: () => handler.disable(),
+    }));
+    for (const control of cameraControlsRef.current) control.disable();
+    setCameraLocked(true);
+  }, []);
+
+  const beginTransform = useCallback((drag: Drag) => {
+    lockCameraControls();
+    dragRef.current = drag;
+  }, [lockCameraControls]);
+
+  const cancelActiveTransform = useCallback(() => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const snapshots = drag.kind === 'resize' ? [drag.snap] : drag.snaps;
+    setShapes((prev) => prev.map((shape) => {
+      const snapshot = snapshots.find((item) => item.id === shape.id);
+      return snapshot
+        ? {
+            ...shape,
+            center: { ...snapshot.center },
+            rotationDeg: snapshot.rotationDeg,
+            linear: { ...snapshot.linear },
+          }
+        : shape;
+    }));
+    if (drag.kind === 'group-rotate') setGroupRotation(drag.rotStart);
+    dragRef.current = null;
+    unlockCameraControls();
+  }, [unlockCameraControls]);
+
+  const finishActiveTransform = useCallback(() => {
+    dragRef.current = null;
+    unlockCameraControls();
+  }, [unlockCameraControls]);
 
   // ---- 맵 초기화 ----
   useEffect(() => {
@@ -262,43 +370,54 @@ export function ShapeTester() {
       style: STYLE_URL,
       center: CENTER,
       zoom: 15,
-      pitch: 0,
-      maxPitch: 0, // 화면축 = 평면 유지 (앵커 픽셀 고정 보장)
+      pitch: initialPitch,
+      bearing: initialBearing,
       attributionControl: false,
     });
-    map.dragRotate.disable();
-    map.touchZoomRotate.disableRotation();
     mapRef.current = map;
-    const rerender = () => forceTick((t) => t + 1);
+    const rerender = () => {
+      forceTick((tick) => tick + 1);
+      setCameraState({ pitch: map.getPitch(), bearing: map.getBearing(), zoom: map.getZoom() });
+    };
+    const cancelIfTransforming = () => {
+      if (dragRef.current) cancelActiveTransform();
+    };
     map.on('load', () => {
       setMapReady(true);
       rerender();
     });
     map.on('move', rerender);
+    map.on('movestart', cancelIfTransforming);
     // 빈 곳(맵 캔버스) 클릭 시 선택 해제. 도형/핸들은 위에서 이벤트를 가로챈다.
     map.on('click', () => setSelected([]));
     return () => {
+      map.off('move', rerender);
+      map.off('movestart', cancelIfTransforming);
+      unlockCameraControls();
       map.remove();
       mapRef.current = null;
     };
-  }, []);
+  }, [cancelActiveTransform, initialBearing, initialPitch, unlockCameraControls]);
 
   // ---- 투영 헬퍼 ----
   const project = useCallback((ll: LngLat): V => {
     const p = mapRef.current!.project([ll.lng, ll.lat]);
     return { x: p.x, y: p.y };
   }, []);
-  const unproject = useCallback((s: V): LngLat => {
-    const ll = mapRef.current!.unproject([s.x, s.y]);
-    return { lng: ll.lng, lat: ll.lat };
+  const screenToGround = useCallback((screen: V): LngLat | null => {
+    const map = mapRef.current;
+    if (!map || !isFiniteV(screen)) return null;
+    const lngLat = map.unproject([screen.x, screen.y]);
+    if (!Number.isFinite(lngLat.lng) || !Number.isFinite(lngLat.lat)) return null;
+    return { lng: lngLat.lng, lat: lngLat.lat };
   }, []);
   const pointerScreen = useCallback((e: PointerEvent | React.PointerEvent): V => {
     const r = containerRef.current!.getBoundingClientRect();
     return { x: e.clientX - r.left, y: e.clientY - r.top };
   }, []);
   const pointerLngLat = useCallback(
-    (e: PointerEvent | React.PointerEvent): LngLat => unproject(pointerScreen(e)),
-    [pointerScreen, unproject],
+    (e: PointerEvent | React.PointerEvent): LngLat | null => screenToGround(pointerScreen(e)),
+    [pointerScreen, screenToGround],
   );
 
   /** 도형 중심 기준으로 로컬 미터 정점 → 화면 */
@@ -330,46 +449,58 @@ export function ShapeTester() {
   const snapOf = (ids: string[]): Snapshot[] =>
     shapesRef.current
       .filter((s) => ids.includes(s.id))
-      .map((s) => ({ id: s.id, center: { ...s.center }, rotationDeg: s.rotationDeg, scale: { ...s.scale } }));
+      .map((s) => ({ id: s.id, center: { ...s.center }, rotationDeg: s.rotationDeg, linear: { ...s.linear } }));
 
   const beginMove = (e: React.PointerEvent, ids: string[]) => {
+    if (!preparePrimaryPointer(e)) return;
+    const pointerStart = pointerLngLat(e);
+    if (!pointerStart) return;
     // 그룹 박스는 자식에서 도출되므로 이동 시 자동으로 따라온다 (별도 처리 불필요).
-    dragRef.current = { kind: 'move', ids, snaps: snapOf(ids), pointerStart: pointerLngLat(e) };
+    beginTransform({ kind: 'move', ids, snaps: snapOf(ids), pointerStart });
   };
   const beginSingleRotate = (e: React.PointerEvent, id: string) => {
-    e.stopPropagation();
+    if (!preparePrimaryPointer(e)) return;
     const s = shapesRef.current.find((x) => x.id === id);
     if (!s) return;
+    const pointer = pointerLngLat(e);
+    if (!pointer) return;
     const frame = new MeterFrame(s.center);
-    const pm = frame.toMeters(pointerLngLat(e));
-    dragRef.current = {
+    const pm = frame.toMeters(pointer);
+    beginTransform({
       kind: 'rotate',
       ids: [id],
       snaps: snapOf([id]),
       frame,
       handleAngleStart: measureAngle({ x: 0, y: 0 }, pm),
-    };
+    });
   };
   const beginSingleResize = (e: React.PointerEvent, id: string, dir: V) => {
-    e.stopPropagation();
+    if (!preparePrimaryPointer(e)) return;
     const s = shapesRef.current.find((x) => x.id === id);
     if (!s) return;
-    dragRef.current = {
+    const bounds = shapeLocalBounds(s);
+    beginTransform({
       kind: 'resize',
       id,
       snap: snapOf([id])[0],
-      halfUnit: localHalfSize({ ...s, scale: { x: 1, y: 1 } }),
+      halfStart: { ...bounds.half },
+      anchorLocal: {
+        x: bounds.center.x - dir.x * bounds.half.x,
+        y: bounds.center.y - dir.y * bounds.half.y,
+      },
       dir,
-    };
+    });
   };
   const beginGroupRotate = (e: React.PointerEvent) => {
-    e.stopPropagation();
+    if (!preparePrimaryPointer(e)) return;
     const sel = shapesRef.current.filter((s) => selectedRef.current.includes(s.id));
     if (sel.length < 2) return;
     const gb = computeGroupBox(sel, groupRotationRef.current);
     const frame = new MeterFrame(gb.center); // 피벗 = centroid (회전에 불변)
-    const pm = frame.toMeters(pointerLngLat(e));
-    dragRef.current = {
+    const pointer = pointerLngLat(e);
+    if (!pointer) return;
+    const pm = frame.toMeters(pointer);
+    beginTransform({
       kind: 'group-rotate',
       ids: selectedRef.current,
       snaps: snapOf(selectedRef.current),
@@ -377,14 +508,14 @@ export function ShapeTester() {
       frame,
       rotStart: groupRotationRef.current,
       handleAngleStart: measureAngle({ x: 0, y: 0 }, pm),
-    };
+    });
   };
   const beginGroupScale = (e: React.PointerEvent, dir: V) => {
-    e.stopPropagation();
+    if (!preparePrimaryPointer(e)) return;
     const sel = shapesRef.current.filter((s) => selectedRef.current.includes(s.id));
     if (sel.length < 2) return;
     const gb = computeGroupBox(sel, groupRotationRef.current);
-    dragRef.current = {
+    beginTransform({
       kind: 'group-scale',
       ids: selectedRef.current,
       snaps: snapOf(selectedRef.current),
@@ -398,7 +529,7 @@ export function ShapeTester() {
         y: gb.boxCenterLocal.y - dir.y * gb.half.y,
       },
       dir,
-    };
+    });
   };
 
   // ---- 전역 pointermove / up (H-4) ----
@@ -409,6 +540,7 @@ export function ShapeTester() {
 
       if (d.kind === 'move') {
         const now = pointerLngLat(e);
+        if (!now) return;
         const start = maplibregl.MercatorCoordinate.fromLngLat([d.pointerStart.lng, d.pointerStart.lat], 0);
         const cur = maplibregl.MercatorCoordinate.fromLngLat([now.lng, now.lat], 0);
         const dx = cur.x - start.x;
@@ -427,7 +559,10 @@ export function ShapeTester() {
 
       if (d.kind === 'rotate') {
         // 단일 도형 제자리 회전
-        const pm = d.frame.toMeters(pointerLngLat(e));
+        const pointer = pointerLngLat(e);
+        if (!pointer) return;
+        const pm = d.frame.toMeters(pointer);
+        if (!isFiniteV(pm)) return;
         const total = measureAngle({ x: 0, y: 0 }, pm) - d.handleAngleStart;
         setShapes((prev) =>
           prev.map((s) => {
@@ -440,7 +575,10 @@ export function ShapeTester() {
       }
 
       if (d.kind === 'group-rotate') {
-        const pm = d.frame.toMeters(pointerLngLat(e));
+        const pointer = pointerLngLat(e);
+        if (!pointer) return;
+        const pm = d.frame.toMeters(pointer);
+        if (!isFiniteV(pm)) return;
         const total = measureAngle({ x: 0, y: 0 }, pm) - d.handleAngleStart; // 절대 - 시작 (A-2)
         setShapes((prev) =>
           prev.map((s) => {
@@ -448,7 +586,7 @@ export function ShapeTester() {
             if (!snap) return s;
             // 자식 중심 오프셋을 그룹 중심 기준 total 만큼 회전 (누산 없음)
             const offset = d.frame.toMeters(snap.center);
-            const newCenterLL = d.frame.toLngLat(rotate(offset, total));
+            const newCenterLL = d.frame.toLngLat(rotateVector(offset, total));
             return {
               ...s,
               center: newCenterLL,
@@ -462,59 +600,70 @@ export function ShapeTester() {
       }
 
       if (d.kind === 'resize') {
-        // PPT 방식: 반대편(anchor) 고정. 잡은 변/모서리만 이동.
+        // 반대편 anchor 고정. 일반 2x2 선형변환을 시작 스냅샷에 절대 적용한다.
         const s0 = d.snap;
+        const pointer = pointerLngLat(e);
+        if (!pointer) return;
         const frame = new MeterFrame(s0.center); // 원점 = 시작 중심 (고정)
-        const pm = frame.toMeters(pointerLngLat(e));
-        const pLocal = rotate(pm, -s0.rotationDeg); // 도형 로컬 축 (회전 제거)
-        const HXs = d.halfUnit.x * s0.scale.x;
-        const HYs = d.halfUnit.y * s0.scale.y;
+        const pm = frame.toMeters(pointer);
+        const pLocal = rotateVector(pm, -s0.rotationDeg); // 도형 로컬 축 (회전 제거)
+        if (!isFiniteV(pLocal)) return;
         const cx = d.dir.x !== 0;
         const cy = d.dir.y !== 0;
-        const anchorX = -d.dir.x * HXs; // 반대편 변 (고정)
-        const anchorY = -d.dir.y * HYs;
-        const newHalfX = cx ? Math.max(MIN_HALF_M, Math.abs(pLocal.x - anchorX) / 2) : HXs;
-        const newHalfY = cy ? Math.max(MIN_HALF_M, Math.abs(pLocal.y - anchorY) / 2) : HYs;
-        const newScaleX = cx ? newHalfX / d.halfUnit.x : s0.scale.x;
-        const newScaleY = cy ? newHalfY / d.halfUnit.y : s0.scale.y;
-        // 새 중심 = 잡은 변과 anchor 변의 중점 (제어 축만)
-        const centerLocalX = cx ? (Math.sign(pLocal.x - anchorX) * newHalfX + anchorX) : 0;
-        const centerLocalY = cy ? (Math.sign(pLocal.y - anchorY) * newHalfY + anchorY) : 0;
-        const newCenter = frame.toLngLat(rotate({ x: centerLocalX, y: centerLocalY }, s0.rotationDeg));
+        const sX = cx
+          ? anchoredAxisScale(pLocal.x, d.anchorLocal.x, d.dir.x as -1 | 1, d.halfStart.x, MIN_HALF_M, MAX_SCALE_FACTOR)
+          : 1;
+        const sY = cy
+          ? anchoredAxisScale(pLocal.y, d.anchorLocal.y, d.dir.y as -1 | 1, d.halfStart.y, MIN_HALF_M, MAX_SCALE_FACTOR)
+          : 1;
+        const resizeScale = { x: sX, y: sY };
+        const nextOriginLocal = transformPointAroundAnchor({ x: 0, y: 0 }, d.anchorLocal, resizeScale);
+        const newCenter = frame.toLngLat(rotateVector(nextOriginLocal, s0.rotationDeg));
+        const newLinear = multiplyM2(scaleM2(sX, sY), s0.linear);
+        if (!isFiniteM2(newLinear)) return;
         setShapes((prev) =>
           prev.map((s) =>
-            s.id === d.id ? { ...s, center: newCenter, scale: { x: newScaleX, y: newScaleY } } : s,
+            s.id === d.id ? { ...s, center: newCenter, linear: newLinear } : s,
           ),
         );
         return;
       }
 
       if (d.kind === 'group-scale') {
-        // OBB 리사이즈: 그룹 로컬(회전된) 축에서 반대편 모서리 고정. 자식 위치·크기 전달.
-        const pm = d.frame.toMeters(pointerLngLat(e));
-        const pLocal = rotate(pm, -d.rotStart); // 그룹 로컬 축 (회전 제거)
+        // OBB 리사이즈: 중심과 각 자식의 전체 선형변환에 같은 affine을 적용한다.
+        const pointer = pointerLngLat(e);
+        if (!pointer) return;
+        const pm = d.frame.toMeters(pointer);
+        const pLocal = rotateVector(pm, -d.rotStart); // 그룹 로컬 축 (회전 제거)
+        if (!isFiniteV(pLocal)) return;
         const A = d.anchorLocal;
         const cx = d.dir.x !== 0;
         const cy = d.dir.y !== 0;
-        const newHalfX = cx ? Math.max(MIN_HALF_M, Math.abs(pLocal.x - A.x) / 2) : d.halfStart.x;
-        const newHalfY = cy ? Math.max(MIN_HALF_M, Math.abs(pLocal.y - A.y) / 2) : d.halfStart.y;
-        const sX = cx ? newHalfX / d.halfStart.x : 1;
-        const sY = cy ? newHalfY / d.halfStart.y : 1;
+        const sX = cx
+          ? anchoredAxisScale(pLocal.x, A.x, d.dir.x as -1 | 1, d.halfStart.x, MIN_HALF_M, MAX_SCALE_FACTOR)
+          : 1;
+        const sY = cy
+          ? anchoredAxisScale(pLocal.y, A.y, d.dir.y as -1 | 1, d.halfStart.y, MIN_HALF_M, MAX_SCALE_FACTOR)
+          : 1;
+        const resizeScale = { x: sX, y: sY };
         setShapes((prev) =>
           prev.map((s) => {
             const snap = d.snaps.find((n) => n.id === s.id);
             if (!snap) return s;
             // 자식 중심을 그룹 로컬 프레임에서 A 기준 스케일 (P' = A + S·(P₀ − A))
-            const offLocal = rotate(d.frame.toMeters(snap.center), -d.rotStart);
-            const newOffLocal = {
-              x: cx ? A.x + (offLocal.x - A.x) * sX : offLocal.x,
-              y: cy ? A.y + (offLocal.y - A.y) * sY : offLocal.y,
-            };
-            const newCenterLL = d.frame.toLngLat(rotate(newOffLocal, d.rotStart));
+            const offLocal = rotateVector(d.frame.toMeters(snap.center), -d.rotStart);
+            const newOffLocal = transformPointAroundAnchor(offLocal, A, resizeScale);
+            const newCenterLL = d.frame.toLngLat(rotateVector(newOffLocal, d.rotStart));
+            const newLinear = scaleLinearInParentFrame(
+              snap.linear,
+              snap.rotationDeg - d.rotStart,
+              resizeScale,
+            );
+            if (!isFiniteM2(newLinear)) return s;
             return {
               ...s,
               center: newCenterLL,
-              scale: { x: snap.scale.x * (cx ? sX : 1), y: snap.scale.y * (cy ? sY : 1) },
+              linear: newLinear,
             };
           }),
         );
@@ -523,22 +672,30 @@ export function ShapeTester() {
       }
     };
 
-    const onUp = () => {
-      dragRef.current = null;
+    const onUp = () => finishActiveTransform();
+    const onCancel = () => cancelActiveTransform();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') cancelActiveTransform();
     };
 
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onCancel);
+    window.addEventListener('blur', onCancel);
+    window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onCancel);
+      window.removeEventListener('blur', onCancel);
+      window.removeEventListener('keydown', onKeyDown);
     };
-  }, [measureAngle, pointerLngLat, pointerScreen]);
+  }, [cancelActiveTransform, finishActiveTransform, measureAngle, pointerLngLat]);
 
   // ---- 도형 선택/이동 ----
   const onShapePointerDown = (e: React.PointerEvent, id: string) => {
-    e.stopPropagation();
     if (e.shiftKey) {
+      if (!preparePrimaryPointer(e)) return;
       setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
       return;
     }
@@ -552,8 +709,22 @@ export function ShapeTester() {
   };
 
   const reset = () => {
+    finishActiveTransform();
     setShapes(initialShapes());
     setSelected([]);
+  };
+
+  const prepareMixedRotationCase = () => {
+    finishActiveTransform();
+    const next = initialShapes();
+    next[0] = { ...next[0], rotationDeg: 45 };
+    next[1] = { ...next[1], rotationDeg: -25 };
+    setShapes(next);
+    setSelected([next[0].id, next[1].id]);
+  };
+
+  const setCamera = (pitch: number, bearing: number) => {
+    mapRef.current?.jumpTo({ pitch, bearing });
   };
 
   const single = selected.length === 1 ? shapes.find((s) => s.id === selected[0]) : null;
@@ -614,7 +785,53 @@ export function ShapeTester() {
 
       {/* 컨트롤 패널 */}
       <div style={panelStyle}>
-        <div style={{ fontWeight: 700, marginBottom: 8 }}>도형 변환 테스터</div>
+        <div style={{ fontWeight: 700, marginBottom: 8 }}>
+          {diagnostics ? 'Pitch / Bearing 변환 테스트' : '도형 변환 테스터'}
+        </div>
+        {diagnostics && (
+          <div style={{ padding: '9px 10px', marginBottom: 10, background: '#0f172a', borderRadius: 8 }}>
+            <label style={{ display: 'block', marginBottom: 8 }}>
+              Pitch <b>{cameraState.pitch.toFixed(0)}°</b>
+              <input
+                aria-label="Pitch"
+                type="range"
+                min={0}
+                max={60}
+                step={1}
+                value={cameraState.pitch}
+                onChange={(event) => setCamera(Number(event.target.value), cameraState.bearing)}
+                style={{ width: '100%' }}
+              />
+            </label>
+            <label style={{ display: 'block', marginBottom: 8 }}>
+              Bearing <b>{cameraState.bearing.toFixed(0)}°</b>
+              <input
+                aria-label="Bearing"
+                type="range"
+                min={-180}
+                max={180}
+                step={1}
+                value={cameraState.bearing}
+                onChange={(event) => setCamera(cameraState.pitch, Number(event.target.value))}
+                style={{ width: '100%' }}
+              />
+            </label>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 5 }}>
+              <button style={miniBtnStyle} onClick={() => setCamera(0, 0)}>0 / 0</button>
+              <button style={miniBtnStyle} onClick={() => setCamera(45, 45)}>45 / 45</button>
+              <button style={miniBtnStyle} onClick={() => setCamera(60, 90)}>60 / 90</button>
+            </div>
+            <button
+              style={{ ...miniBtnStyle, width: '100%', marginTop: 6 }}
+              onClick={prepareMixedRotationCase}
+            >
+              혼합 회전 그룹 준비 (45° / -25°)
+            </button>
+            <div style={{ marginTop: 8, fontSize: 11, color: cameraLocked ? '#fbbf24' : '#86efac' }}>
+              {cameraLocked ? '도형 변환 중 · 카메라 임시 잠금' : `카메라 조작 가능 · zoom ${cameraState.zoom.toFixed(1)}`}
+            </div>
+          </div>
+        )}
         <label style={rowStyle}>
           <input type="checkbox" checked={buggyAngle} onChange={(e) => setBuggyAngle(e.target.checked)} />
           버그 재현 (각도 부호 반전 · C-1)
@@ -625,7 +842,7 @@ export function ShapeTester() {
           {single && (
             <>
               <br />회전: <b>{single.rotationDeg.toFixed(1)}°</b>
-              <br />스케일: <b>{single.scale.x.toFixed(2)} × {single.scale.y.toFixed(2)}</b>
+              <br />축 길이: <b>{matrixAxisLengths(single.linear).x.toFixed(2)} × {matrixAxisLengths(single.linear).y.toFixed(2)}</b>
             </>
           )}
           <br />
@@ -634,6 +851,12 @@ export function ShapeTester() {
             <br />· Shift+클릭 = 다중 선택
             <br />· 빈 맵 클릭 = 선택 해제
             <br />· 2개 이상 = 그룹 핸들
+            {diagnostics && (
+              <>
+                <br />· 권장: 60/90에서 8개 핸들·회전·왕복 확인
+                <br />· 드래그 중 카메라 변경 시 변환 자동 취소
+              </>
+            )}
           </span>
         </div>
       </div>
@@ -654,17 +877,20 @@ function SingleHandles({
   onResize: (e: React.PointerEvent, dir: V) => void;
 }) {
   const frame = new MeterFrame(shape.center);
-  const half = localHalfSize(shape);
-  const toScreen = (local: V) => project(frame.toLngLat(rotate(local, shape.rotationDeg)));
+  const bounds = shapeLocalBounds(shape);
+  const half = bounds.half;
+  const c = bounds.center;
+  const toScreen = (local: V) => project(frame.toLngLat(rotateVector(local, shape.rotationDeg)));
   // 외곽선 (모서리 4점)
   const outline = [
-    { x: -half.x, y: half.y },
-    { x: half.x, y: half.y },
-    { x: half.x, y: -half.y },
-    { x: -half.x, y: -half.y },
+    { x: c.x - half.x, y: c.y + half.y },
+    { x: c.x + half.x, y: c.y + half.y },
+    { x: c.x + half.x, y: c.y - half.y },
+    { x: c.x - half.x, y: c.y - half.y },
   ].map(toScreen);
-  const topEdge = toScreen({ x: 0, y: half.y });
-  const rotPt = toScreen({ x: 0, y: half.y + ROT_OFFSET_M });
+  const topEdge = toScreen({ x: c.x, y: c.y + half.y });
+  const rotPt = toScreen({ x: c.x, y: c.y + half.y + ROT_OFFSET_M });
+  const centerScreen = toScreen(c);
 
   return (
     <g>
@@ -685,7 +911,7 @@ function SingleHandles({
         onPointerDown={onRotate}
       />
       {HANDLE_DIRS.map((dir, i) => {
-        const p = toScreen({ x: dir.x * half.x, y: dir.y * half.y });
+        const p = toScreen({ x: c.x + dir.x * half.x, y: c.y + dir.y * half.y });
         return (
           <rect
             key={i}
@@ -695,7 +921,7 @@ function SingleHandles({
             height={HANDLE}
             fill="#fff"
             stroke="#333"
-            style={{ cursor: cursorForDir(dir), pointerEvents: 'auto' }}
+            style={{ cursor: cursorForScreenAxis(centerScreen, p, dir), pointerEvents: 'auto' }}
             onPointerDown={(e) => onResize(e, dir)}
           />
         );
@@ -722,7 +948,7 @@ function GroupHandles({
   const c = box.boxCenterLocal;
   const half = box.half;
   const toScreen = (local: V) =>
-    project(mf.toLngLat(rotate({ x: c.x + local.x, y: c.y + local.y }, box.rotationDeg)));
+    project(mf.toLngLat(rotateVector({ x: c.x + local.x, y: c.y + local.y }, box.rotationDeg)));
   const outline = [
     { x: -half.x, y: half.y },
     { x: half.x, y: half.y },
@@ -731,6 +957,7 @@ function GroupHandles({
   ].map(toScreen);
   const topEdge = toScreen({ x: 0, y: half.y });
   const rotPt = toScreen({ x: 0, y: half.y + ROT_OFFSET_M });
+  const centerScreen = toScreen({ x: 0, y: 0 });
 
   return (
     <g>
@@ -762,7 +989,7 @@ function GroupHandles({
             height={HANDLE}
             fill="#5b8cff"
             stroke="#fff"
-            style={{ cursor: cursorForDir(dir), pointerEvents: 'auto' }}
+            style={{ cursor: cursorForScreenAxis(centerScreen, p, dir), pointerEvents: 'auto' }}
             onPointerDown={(e) => onScale(e, dir)}
           />
         );
@@ -800,6 +1027,15 @@ const btnStyle: React.CSSProperties = {
   border: 'none',
   borderRadius: 6,
   cursor: 'pointer',
+};
+const miniBtnStyle: React.CSSProperties = {
+  padding: '5px 4px',
+  background: '#334155',
+  color: '#fff',
+  border: 'none',
+  borderRadius: 5,
+  cursor: 'pointer',
+  fontSize: 11,
 };
 
 export default ShapeTester;
